@@ -16,13 +16,14 @@
         Cannot reach the viewer server. Check that it is running and try again.
     </div>
     {{ end }}
-    <div class="container{{ if or .User .ThreadMessages }} thread-open{{ end }}">
+    <div class="container{{ if or .User .ThreadMessages .Search }} thread-open{{ end }}">
         <section class="channel-sidebar">
             <header>
                 <div class="sidebar-header-inner">
                     <h1>Slackdump</h1>
                     <small class="subtitle">{{.Type}}: {{.Name}}</small>
                 </div>
+                {{ if and .CanSearch .Interactive }}{{ template "search_box" . }}{{ end }}
             </header>
             <!-- Channel list goes here -->
             {{ template "channel_list" . }}
@@ -31,6 +32,8 @@
             <!-- Conversations go here -->
             {{ if .CanvasActive }}
             {{ template "hx_canvas" . }}
+            {{ else if .ThreadInMain }}
+            {{ template "hx_thread" . }}
             {{ else if .Messages }}
             {{ template "hx_conversation" . }}
             {{ else }}
@@ -44,7 +47,9 @@
         </section>
         <section id="thread" class="thread">
             <!-- Thread messages go here -->
-            {{ if .User }}
+            {{ if .Search }}
+            {{ template "hx_search" .Search }}
+            {{ else if .User }}
             {{ template "hx_user" (userview .User .Interactive) }}
             {{ else if .ThreadMessages }}
             {{ template "hx_thread" . }}
@@ -71,6 +76,98 @@
 
 {{ define "channel_link" }}
 <a id="channel-link-{{.Channel.ID}}" href="{{ channelurl .Channel.ID }}"{{ if .Interactive }} hx-get="{{ channelurl .Channel.ID }}" hx-target="#conversation" hx-push-url="true"{{ end }}>{{ channelname .Channel }}</a>
+{{ end }}
+
+{{ define "search_box" }}
+<form class="search-box" role="search" onsubmit="return false">
+    <input type="search" id="search-input" name="q" placeholder="Search messages"
+           autocomplete="off" aria-label="Search messages"
+           hx-get="/search" hx-target="#thread" hx-trigger="keyup changed delay:300ms, search"
+           hx-include="[name='ch']">
+    {{ template "search_scope" . }}
+</form>
+{{ end }}
+
+{{/* The scope radios live in the sidebar, which only renders on a full page
+     load — clicking a channel swaps #conversation alone.  So the block is
+     defined once and re-emitted out of band whenever the conversation changes
+     (see hx_conversation_swap); otherwise "this conversation" would name
+     whichever channel you happened to load the page on. */}}
+{{ define "search_scope_inner" }}
+    {{/* Each radio needs its own trigger: hx-include on the input only reads
+         whichever radio is checked when the input fires, so without this a
+         scope change would do nothing until you retyped. */}}
+    <label class="search-scope"><input type="radio" name="ch" value="" checked
+           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input"> All conversations</label>
+    {{ if .Conversation.ID }}
+    <label class="search-scope"><input type="radio" name="ch" value="{{ .Conversation.ID }}"
+           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input"> {{ channelname .Conversation }}</label>
+    {{ end }}
+{{ end }}
+
+{{ define "search_scope" }}
+<div id="search-scope" class="search-scope-group">{{ template "search_scope_inner" . }}</div>
+{{ end }}
+
+{{ define "search_scope_oob" }}
+<div id="search-scope" class="search-scope-group" hx-swap-oob="outerHTML">{{ template "search_scope_inner" . }}</div>
+{{ end }}
+
+{{/* Used by channelPartial: the conversation swap plus an out-of-band refresh
+     of the scope radios, so the per-conversation option tracks what you are
+     actually looking at. */}}
+{{ define "hx_conversation_swap" }}
+{{ template "hx_conversation" . }}
+{{ if .CanSearch }}{{ template "search_scope_oob" . }}{{ end }}
+{{ end }}
+
+{{ define "hx_search" }}
+<header class="thread-header">
+    <h2>Search</h2>
+    <button type="button" class="close-button" data-close-panel aria-label="Close search panel">&times;</button>
+</header>
+<div class="search-results">
+    {{ if .TooShort }}
+    <p class="search-note">Type at least 2 characters.</p>
+    {{ else if not .Hits }}
+    <p class="search-note">No matches for &ldquo;{{ .Query }}&rdquo;.</p>
+    {{ else }}
+    <p class="search-note">
+        {{ if .Truncated }}showing {{ len .Hits }} most recent matches &mdash; narrow your search{{ else }}{{ len .Hits }} matches{{ end }}
+    </p>
+    {{ range .Hits }}
+    <a class="search-hit-row{{ if .Active }} active{{ end }}" href="{{ .URL }}"
+       hx-get="{{ .URL }}" hx-target="#thread" hx-swap="innerHTML">
+        <span class="search-hit-channel">{{ .ChannelName }}{{ if .IsThread }} &#8627;{{ end }}</span>
+        <span class="search-hit-text">{{ .Excerpt }}</span>
+    </a>
+    {{ end }}
+    {{ end }}
+</div>
+{{ if .Active }}
+<nav class="search-nav" aria-label="Search hits">
+    {{ if .PrevURL }}
+    <a class="paging-link" href="{{ .PrevURL }}" hx-get="{{ .PrevURL }}" hx-target="#thread" hx-swap="innerHTML" rel="prev">&lsaquo; Prev</a>
+    {{ else }}
+    <span class="paging-link disabled" aria-hidden="true">&lsaquo; Prev</span>
+    {{ end }}
+    <span class="paging-status">{{ .Active }} of {{ len .Hits }}</span>
+    {{ if .NextURL }}
+    <a class="paging-link" href="{{ .NextURL }}" hx-get="{{ .NextURL }}" hx-target="#thread" hx-swap="innerHTML" rel="next">Next &rsaquo;</a>
+    {{ else }}
+    <span class="paging-link disabled" aria-hidden="true">Next &rsaquo;</span>
+    {{ end }}
+</nav>
+{{ end }}
+{{ if .OOB }}
+<section id="conversation" class="conversations" hx-swap-oob="outerHTML">
+    {{ if .OOB.ThreadInMain }}
+    {{ template "hx_thread" .OOB }}
+    {{ else }}
+    {{ template "hx_conversation" .OOB }}
+    {{ end }}
+</section>
+{{ end }}
 {{ end }}
 
 {{define "hx_chan_header"}}
@@ -165,7 +262,7 @@
             <span class="avatar"><img class="avatar" src="{{ userpic $el.User }}" /></span>
             {{ end }}
             <div class="message-inner">
-                {{ template "render_message" (msgview $id $el) }}
+                {{ template "render_message" (msgview $id $el $.HighlightTS) }}
                 {{ if is_thread_start $el }}
                 <footer class="thread-info">
                 <a href="{{ threadurl $id $el.ThreadTimestamp }}"{{ if $.Interactive }} hx-get="{{ threadurl $id $el.ThreadTimestamp }}" hx-target="#thread"{{ end }}>
@@ -206,7 +303,9 @@
 {{define "hx_thread"}}
 <header class="thread-header">
     <h2>Thread: {{ .ThreadID }}</h2>
-    {{ if .Interactive }}<button type="button" id="close-thread" class="close-button" data-close-panel aria-label="Close thread panel">&times;</button>{{ else }}<a id="close-thread" class="close-button" href="{{ channelurl .Conversation.ID }}" aria-label="Close thread panel">&times;</a>{{ end }}
+    {{ if .ThreadInMain }}
+    <a class="close-button" href="{{ channelurl .Conversation.ID }}" hx-get="{{ channelurl .Conversation.ID }}" hx-target="#conversation" hx-swap="innerHTML" aria-label="Back to conversation">&larr; Back to {{ channelname .Conversation }}</a>
+    {{ else if .Interactive }}<button type="button" id="close-thread" class="close-button" data-close-panel aria-label="Close thread panel">&times;</button>{{ else }}<a id="close-thread" class="close-button" href="{{ channelurl .Conversation.ID }}" aria-label="Close thread panel">&times;</a>{{ end }}
 </header>
 <p class="thread-link-row"><a id="thread-link" href="{{ threadmsgurl .Conversation.ID .ThreadID .ThreadID }}">Link to this thread</a></p>
 <div class="message-list">
@@ -221,7 +320,7 @@
         <span class="avatar"><img class="avatar" src="{{ userpic $el.User }}" /></span>
         {{ end }}
         <div class="message-inner">
-            {{ template "render_message" (msgview "" $el) }}
+            {{ template "render_message" (msgview "" $el $.HighlightTS) }}
         </div>
         {{ end }}
     </article>
@@ -233,7 +332,7 @@
 {{end}}
 
 {{ define "render_message" }}
-<header class="message-header" id="{{.Msg.Timestamp}}">
+<header class="message-header{{ if and .HighlightTS (eq .Msg.Timestamp .HighlightTS) }} search-hit{{ end }}" id="{{.Msg.Timestamp}}">
     <span class="message-sender">
         {{ if ( or ( is_app_msg .Msg ) ( not .Msg.User ) ) -}}
         	{{ username .Msg }}

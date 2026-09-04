@@ -12,6 +12,7 @@
 | `handlers.go` | All HTTP handlers, `mainView` data struct, `setConversation` helper |
 | `filestorage.go` | `fileByIDStorage` optional extension interface + `fileByID` helper |
 | `paging.go` | `messagePager` extension interface, page arithmetic, `pageFromSeq` fallback, `channelPage`, `messagePageOf` |
+| `search.go` | `messageSearcher` feature gate, `searchView`/`searchHit`, excerpting, hit activation |
 | `template.go` | Template compilation (`initTemplates`), FuncMap, sender classification |
 | `templates/index.html` | All HTML template defines (full page + HTMX partials + JS) |
 | `templates/styles.html` | All CSS (single `hx_css` define, CSS variables, dark mode) |
@@ -182,10 +183,72 @@ chunkdir archives, `RenderThread` scans the channel once in `messagePageOf` and 
 `channelPage`'s `pageFromSeq` fallback.
 
 This is a deliberate trade-off, not an oversight. Before paging, that path made one scan but
-rendered the *entire* timeline (8.97 MB of HTML for a 9,550-message channel); it now makes two
-scans and renders 100 messages, which is faster overall because rendering dominated. Collapsing
-the two scans would mean threading an ordinal through `pageFromSeq`, and that complexity is not
-worth it unless profiling on a large export says otherwise.
+rendered the *entire* timeline — multiple megabytes of HTML for a long conversation; it now makes
+two scans and renders one page, which is faster overall because rendering dominated.
+
+Profiled on a long conversation in export format, a thread deep link costs roughly five times a
+database one, both still well under a second. So the double scan is real but modest. Collapsing it
+would mean threading an ordinal through `pageFromSeq`; at that cost the complexity is not worth
+it.
+
+### 19. `CanSearch` is a feature gate, not a fast path
+
+The `messageSearcher` type assertion decides whether search **exists**, not merely
+whether it is fast. A source that implements it gets the search UI; one that does not gets no
+search box and `/search` returns 404. There is deliberately **no fallback**: scanning every
+conversation on each debounced keystroke would make chunk/export/dump archives slower than
+useless, and a search box that silently takes ten seconds is worse than none. `slackdump convert
+-f database` turns those formats into something searchable.
+
+This mirrors the `aliaser`/`CanAlias` gate exactly — assertion, `mainView` field,
+`{{ if and .CanSearch .Interactive }}` in templates, early `http.NotFound` in the handler. One
+asymmetry is intended: `CanAlias` needs a *writable* database, `CanSearch` accepts read-only.
+
+`view()` is the only place that builds a `mainView`, which is what keeps the gate consistent
+across every handler. If a second construction site ever appears, it must set `CanSearch` too.
+
+### 20. One endpoint updates both panes
+
+`/search?q=&ch=&i=N` returns the results panel **and** an `hx-swap-oob` fragment replacing
+`#conversation` with hit N's context. Clicking a result row and pressing Prev/Next are therefore
+the *same request*, and cannot drift apart. Do not add a second endpoint for stepping — the
+moment stepping has its own path, the two behaviours diverge silently.
+
+Channel-message hits resolve through `messagePageOf`, reusing the paging deep-link machinery;
+thread replies render the thread in the conversation pane instead.
+
+**`hx-swap-oob` only means something inside an htmx AJAX response.** On a direct or bookmarked
+`/search?…&i=N` the fragment is inert markup, so `renderSearch` folds `sv.OOB` into the page and
+drops the fragment. Skip that and the page renders two `#conversation` elements — a placeholder in
+the real one and an inert copy nested inside the results panel. `index.html` needs its own
+`ThreadInMain` branch for the same reason, since a thread hit sets `ThreadMessages` rather than
+`Messages` and would otherwise fall through to the placeholder.
+
+The scope radios have the mirror-image problem: they live in the sidebar, which never re-renders
+on an HTMX channel swap, so `channelPartial` returns `hx_conversation_swap` — the conversation
+plus an out-of-band refresh of `search_scope`. Without it "this conversation" names whichever
+channel the page was first loaded on.
+
+### 21. `hx_thread` serves two homes
+
+`ThreadInMain` switches its header between the panel close button and a "← Back to" link. In the
+conversation pane the close button would close the *search results*, not the thread. Keep this as
+one conditional inside the single define; a second define would drift.
+
+### 22. Search UI is live-mode only, and JS only clicks
+
+The search box renders only under `.Interactive`, so static export has no search and nothing to
+degrade. Two `viewer.js` behaviours support it, both enhancements per invariant 12:
+
+- an `htmx:afterSwap` listener opens the side panel for anything swapped into `#thread`. Without
+  it the search box — an `<input>` firing on `keyup`, not an anchor — loads results into a panel
+  that is still `display:none`. This was a real bug: results present in the DOM, invisible.
+- `scrollHitIntoView` scrolls `.search-hit` into view on `htmx:afterSettle`, because an OOB swap
+  is not a navigation and the `#anchor` never fires. Before the fix the highlighted message could
+  sit thousands of pixels below the fold, off screen.
+
+`onSearchKeydown` only calls `.click()` on the server-rendered Prev/Next links. It never builds a
+URL or holds state — that is what keeps the keyboard path identical to the mouse path.
 
 ---
 
@@ -209,15 +272,18 @@ Receives a `messageView` (defined in `handlers.go`), **not** a bare `slack.Messa
 Use the `msgview` template func to construct one at the call site:
 
 ```
-{{ template "render_message" (msgview $channelID $msg) }}
+{{ template "render_message" (msgview $channelID $msg $highlightTS) }}
 ```
 
 | Field | Type | Purpose |
 |---|---|---|
 | `.Msg` | `slack.Message` | The message to render |
 | `.ChannelID` | `string` | Channel ID for reply-to anchor link; pass `""` to suppress the reply banner |
+| `.HighlightTS` | `string` | Timestamp of the active search hit, if any; when it equals `.Msg.Timestamp` the header gets the `search-hit` highlight class |
 
 Pass `""` as `$channelID` in the thread panel (`hx_thread`), where the parent message lives on a different page and the anchor link would be broken.
+
+`$highlightTS` is `mainView.HighlightTS` (`$.HighlightTS` at the call site) — it closes over nothing, so every `msgview` call site must pass it through explicitly even when no hit is active (the zero value, `""`, never matches a real timestamp).
 
 ### `channel_list`
 

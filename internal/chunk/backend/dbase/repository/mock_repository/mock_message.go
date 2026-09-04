@@ -293,6 +293,21 @@ func (mr *MockMessageRepositoryMockRecorder) PageForID(ctx, conn, channelID, lim
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PageForID", reflect.TypeOf((*MockMessageRepository)(nil).PageForID), ctx, conn, channelID, limit, offset)
 }
 
+// SearchMessages mocks base method.
+func (m *MockMessageRepository) SearchMessages(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, limit int) (iter.Seq2[repository.DBMessage, error], error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SearchMessages", ctx, conn, query, channelID, limit)
+	ret0, _ := ret[0].(iter.Seq2[repository.DBMessage, error])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SearchMessages indicates an expected call of SearchMessages.
+func (mr *MockMessageRepositoryMockRecorder) SearchMessages(ctx, conn, query, channelID, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SearchMessages", reflect.TypeOf((*MockMessageRepository)(nil).SearchMessages), ctx, conn, query, channelID, limit)
+}
+
 // Sorted mocks base method.
 func (m *MockMessageRepository) Sorted(ctx context.Context, conn sqlx.QueryerContext, channelID string, order repository.Order) (iter.Seq2[repository.DBMessage, error], error) {
 	m.ctrl.T.Helper()

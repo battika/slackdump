@@ -1745,3 +1745,107 @@ func Test_messageRepository_CountBeforeID(t *testing.T) {
 		})
 	}
 }
+
+// literalPercentPrepFn inserts a single message containing a literal percent
+// sign.  It is deliberately separate from messagePrepFn: adding this message to
+// the shared fixture would shift the expected results of every other test that
+// uses it.
+func literalPercentPrepFn(t *testing.T, conn PrepareExtContext) {
+	t.Helper()
+	prepChunk(chunk.CMessages)(t, conn)
+	msg := slack.Message{Msg: slack.Msg{Timestamp: "126.888", Text: "100% done"}}
+	if err := NewMessageRepository().Insert(t.Context(), conn, must(NewDBMessage(1, 0, "C123", &msg))); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+}
+
+func Test_messageRepository_SearchMessages(t *testing.T) {
+	type args struct {
+		ctx       context.Context
+		conn      sqlx.QueryerContext
+		query     string
+		channelID string
+		limit     int
+	}
+	tests := []struct {
+		name      string
+		args      args
+		prepFn    utilityFn
+		wantTexts []string
+		wantErr   bool
+	}{
+		{
+			name:   "finds a channel message",
+			args:   args{ctx: t.Context(), conn: testConn(t), query: "B'", limit: 10},
+			prepFn: messagePrepFn,
+			// B' lives in the newer chunk; the older B must be deduplicated away.
+			wantTexts: []string{"B'"},
+		},
+		{
+			name:   "reaches thread replies",
+			args:   args{ctx: t.Context(), conn: testConn(t), query: "thread", limit: 10},
+			prepFn: messagePrepFn,
+			// Newest first.  These are excluded by channelTimelineCondition,
+			// which is exactly why search must not use it.
+			wantTexts: []string{"C thread 2", "C thread 1"},
+		},
+		{
+			name:      "scopes to one channel",
+			args:      args{ctx: t.Context(), conn: testConn(t), query: "e", channelID: "D124", limit: 10},
+			prepFn:    messagePrepFn,
+			wantTexts: nil, // D124 holds X, Y, Z — no "e"
+		},
+		{
+			name:      "case insensitive",
+			args:      args{ctx: t.Context(), conn: testConn(t), query: "c THREAD 1", limit: 10},
+			prepFn:    messagePrepFn,
+			wantTexts: []string{"C thread 1"},
+		},
+		{
+			name:   "percent is matched literally, not as a wildcard",
+			args:   args{ctx: t.Context(), conn: testConn(t), query: "%", limit: 10},
+			prepFn: messagePrepFn,
+			// Without escapeLike this would return every message in the archive.
+			wantTexts: nil,
+		},
+		{
+			name:   "a literal percent is still findable",
+			args:   args{ctx: t.Context(), conn: testConn(t), query: "%", limit: 10},
+			prepFn: literalPercentPrepFn,
+			// The positive counterpart to the row above, and the only thing
+			// that proves the ESCAPE clause is live rather than merely
+			// present: drop ESCAPE while keeping escapeLike and the backslash
+			// it inserts becomes a literal to match, so this row fails while
+			// every other row still passes.
+			wantTexts: []string{"100% done"},
+		},
+		{
+			name:      "limit caps the result set",
+			args:      args{ctx: t.Context(), conn: testConn(t), query: "thread", limit: 1},
+			prepFn:    messagePrepFn,
+			wantTexts: []string{"C thread 2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.prepFn != nil {
+				tt.prepFn(t, tt.args.conn.(PrepareExtContext))
+			}
+			r := messageRepository{genericRepository: genericRepository[DBMessage]{DBMessage{}}}
+			it, err := r.SearchMessages(tt.args.ctx, tt.args.conn, tt.args.query, tt.args.channelID, tt.args.limit)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SearchMessages() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			var got []string
+			for dbm, err := range it {
+				if err != nil {
+					t.Fatalf("iteration error = %v", err)
+				}
+				got = append(got, dbm.Text)
+			}
+			if !reflect.DeepEqual(got, tt.wantTexts) {
+				t.Errorf("SearchMessages() = %v, want %v", got, tt.wantTexts)
+			}
+		})
+	}
+}

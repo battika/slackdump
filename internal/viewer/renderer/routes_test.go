@@ -155,3 +155,27 @@ func TestRoutes_ChannelMessage(t *testing.T) {
 		}
 	})
 }
+
+func TestRoutes_SearchHit(t *testing.T) {
+	tests := []struct {
+		name      string
+		rts       *Routes
+		query     string
+		channelID string
+		i         int
+		want      string
+	}{
+		{"global hit", NewRoutes(ModeLive), "login", "", 3, "/search?i=3&q=login"},
+		{"scoped hit", NewRoutes(ModeLive), "login", "C1", 3, "/search?ch=C1&i=3&q=login"},
+		{"no active hit", NewRoutes(ModeLive), "login", "", 0, "/search?q=login"},
+		{"query is escaped", NewRoutes(ModeLive), "a b&c", "", 0, "/search?q=a+b%26c"},
+		{"static mode has no search", NewRoutes(ModeStatic), "login", "", 3, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rts.SearchHit(tt.query, tt.channelID, tt.i); got != tt.want {
+				t.Errorf("SearchHit() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

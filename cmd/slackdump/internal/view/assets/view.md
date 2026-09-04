@@ -29,6 +29,34 @@ conversations at once:
 slackdump view -page-size 250 <directory_or_file>
 ```
 
+## Search
+
+Database archives can be searched from the viewer. Type in the search box at
+the top of the sidebar and results appear in the right-hand panel as you type;
+a scope selector switches between searching every conversation and searching
+only the one you are viewing.
+
+Clicking a result opens that conversation on the page holding the message and
+highlights it, without closing the results list, so you can work through the
+matches one at a time. `Prev`/`Next` at the foot of the panel step between
+hits, as do the `n` and `N` keys. A result inside a thread opens the thread
+itself, with a link back to the conversation.
+
+Matching is case-insensitive, including accented characters, so a word typed
+in any case is found. Accents themselves are not stripped: a term written
+without them will not match the accented spelling. The search term is
+matched literally, so characters such as `%` and `_` have no special meaning.
+At most 500 matches are shown, newest first; the panel says so when there were
+more.
+
+Search requires a database archive, because it needs an indexed store to query.
+Chunk, export and dump archives show no search box at all rather than a slow
+one. Convert them first:
+
+```bash
+slackdump convert -f database -o <output_directory> <directory_or_file>
+```
+
 ## Usage
 
 ```bash

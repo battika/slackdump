@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/rusq/slackdump/v4/internal/structures"
@@ -157,6 +158,25 @@ func (r *Routes) File(id, filename string) string {
 		return routePath("files", id, source.SanitizeFilename(filename))
 	}
 	return routePath("slackdump", "file", id, filename)
+}
+
+// SearchHit returns the URL that activates hit i of a search.  It is the only
+// search URL the viewer emits: result rows and the prev/next controls all use
+// it, so a row click and a hit step are the same request.  A non-positive i
+// means "no hit activated".  Static output has no search, so it returns "".
+func (r *Routes) SearchHit(query, channelID string, i int) string {
+	if r == nil || r.mode == ModeStatic {
+		return ""
+	}
+	vals := url.Values{}
+	vals.Set("q", query)
+	if channelID != "" {
+		vals.Set("ch", channelID)
+	}
+	if i > 0 {
+		vals.Set("i", strconv.Itoa(i))
+	}
+	return "/search?" + vals.Encode()
 }
 
 func (r *Routes) StaticAsset(name string) string {

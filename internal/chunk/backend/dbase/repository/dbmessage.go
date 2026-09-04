@@ -140,6 +140,12 @@ type MessageRepository interface {
 	// timestamp at or before ts.  The result is 1-based for an existing
 	// message: the oldest message in the channel returns 1.
 	CountBeforeID(ctx context.Context, conn sqlx.QueryerContext, channelID, ts string) (int64, error)
+	// SearchMessages returns messages whose text contains query, newest first,
+	// across the channel timeline AND thread replies.  An empty channelID
+	// searches every conversation.  Matching is case-insensitive including
+	// accented characters, and query is matched literally — LIKE
+	// metacharacters in it carry no special meaning.
+	SearchMessages(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, limit int) (iter.Seq2[DBMessage, error], error)
 	// AllForID returns all messages in a channel.
 	AllForID(ctx context.Context, conn sqlx.QueryerContext, channelID string) (iter.Seq2[DBMessage, error], error)
 	// PageForID returns a window of the channel timeline, ordered oldest
@@ -202,6 +208,28 @@ func (r messageRepository) CountBeforeID(ctx context.Context, conn sqlx.QueryerC
 		queryParams{
 			Where: "T.CHANNEL_ID = ? AND T.ID <= ?" + channelTimelineCondition,
 			Binds: []any{channelID, id}},
+		chunk.CMessages, chunk.CThreadMessages,
+	)
+}
+
+func (r messageRepository) SearchMessages(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, limit int) (iter.Seq2[DBMessage, error], error) {
+	// Deliberately no channelTimelineCondition: that condition keeps thread
+	// replies out of a channel timeline, and search must reach them.
+	where := lowerFn + "(T.TXT) LIKE ? ESCAPE '\\'"
+	binds := []any{"%" + escapeLike(strings.ToLower(query)) + "%"}
+	if channelID != "" {
+		where += " AND T.CHANNEL_ID = ?"
+		binds = append(binds, channelID)
+	}
+	return r.allOfTypeWhere(
+		ctx,
+		conn,
+		queryParams{
+			Where:   where,
+			Binds:   binds,
+			OrderBy: []string{"T.ID DESC"},
+			Limit:   limit,
+		},
 		chunk.CMessages, chunk.CThreadMessages,
 	)
 }

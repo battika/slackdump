@@ -1205,3 +1205,106 @@ func TestSource_MessageOrdinal(t *testing.T) {
 		})
 	}
 }
+
+func TestSource_SearchMessages(t *testing.T) {
+	msgs := []slack.Message{
+		{Msg: slack.Msg{Timestamp: "1234567890.000001", Text: "alpha login"}},
+		{Msg: slack.Msg{Timestamp: "1234567890.000002", Text: "beta login"}},
+		{Msg: slack.Msg{Timestamp: "1234567890.000003", Text: "gamma"}},
+	}
+	newSrc := func(t *testing.T) *Source {
+		t.Helper()
+		conn := testDB(t)
+		prepTestChunk(&chunk.Chunk{Type: chunk.CMessages, ChannelID: "C01", Messages: msgs})(t, conn)
+		return &Source{conn: conn, canClose: true}
+	}
+
+	t.Run("returns newest first and stamps the channel", func(t *testing.T) {
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if truncated {
+			t.Error("truncated = true, want false")
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d hits, want 2", len(got))
+		}
+		if got[0].Text != "beta login" || got[1].Text != "alpha login" {
+			t.Errorf("hits = %q, %q; want newest first", got[0].Text, got[1].Text)
+		}
+		for i, m := range got {
+			if m.Channel != "C01" {
+				t.Errorf("hit %d Channel = %q, want C01", i, m.Channel)
+			}
+		}
+	})
+
+	t.Run("reports truncation and trims to the cap", func(t *testing.T) {
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 1)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if !truncated {
+			t.Error("truncated = false, want true")
+		}
+		if len(got) != 1 {
+			t.Errorf("got %d hits, want exactly the cap (1)", len(got))
+		}
+	})
+
+	t.Run("exactly at the cap is not truncated", func(t *testing.T) {
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 2)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if truncated {
+			t.Error("truncated = true, want false when the result exactly fills the cap")
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d hits, want 2", len(got))
+		}
+	})
+
+	t.Run("scoped to a channel", func(t *testing.T) {
+		got, _, err := newSrc(t).SearchMessages(t.Context(), "login", "C01", 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d hits, want 2", len(got))
+		}
+		got, _, err = newSrc(t).SearchMessages(t.Context(), "login", "CNOPE", 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d hits for an unknown channel, want 0", len(got))
+		}
+	})
+
+	t.Run("non-positive limits return nothing rather than panicking", func(t *testing.T) {
+		// A negative limit used to reach msgs[:limit] and panic: the
+		// repository reads Limit <= 0 as "no LIMIT clause", so the query ran
+		// unbounded and the trim then sliced with a negative bound.
+		for _, limit := range []int{0, -1} {
+			got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", limit)
+			if err != nil {
+				t.Fatalf("limit=%d: SearchMessages() error = %v", limit, err)
+			}
+			if len(got) != 0 || truncated {
+				t.Errorf("limit=%d: got %d hits truncated=%v, want 0/false", limit, len(got), truncated)
+			}
+		}
+	})
+
+	t.Run("no matches", func(t *testing.T) {
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "zzz", "", 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if len(got) != 0 || truncated {
+			t.Errorf("got %d hits truncated=%v, want 0/false", len(got), truncated)
+		}
+	})
+}

@@ -72,6 +72,13 @@ func TestStaticHandler_ServesEmbeddedAssets(t *testing.T) {
 		{path: "/static/htmx.min.js", want: "var htmx="},
 		{path: "/static/viewer.js", want: "function syncActiveChannel"},
 		{path: "/static/viewer.js", want: "function expandGroup"},
+		// The side panel is display:none until .container gets thread-open,
+		// and the search box is an <input> firing on keyup, so without this
+		// listener search results swap into a hidden panel.
+		{path: "/static/viewer.js", want: `htmx:afterSwap`},
+		// Search hit stepping and scrolling the activated message into view.
+		{path: "/static/viewer.js", want: "onSearchKeydown"},
+		{path: "/static/viewer.js", want: "scrollHitIntoView"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)

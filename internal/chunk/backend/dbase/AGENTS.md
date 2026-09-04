@@ -305,6 +305,59 @@ short timestamps like `"123.456"` (→ `123456`). Ordering is only preserved bet
 equal digit width. Real Slack timestamps are always 10-digit seconds plus 6-digit microseconds, so
 production data is safe; synthetic fixtures must use the same shape or comparisons invert.
 
+### 19. Search deliberately omits `channelTimelineCondition`
+
+`SearchMessages` is the one message query that does **not** apply
+`channelTimelineCondition`. That condition exists to keep thread replies out of
+a channel *timeline*; search must reach them, since a large share of real
+content lives in threads. Adding it back silently drops every thread reply from
+results — the `reaches thread replies` test row is the guard, and it fails if
+you do.
+
+Truncation is detected by asking for `limit+1` rows and trimming: one row beyond
+the cap means "there were more", with no second `COUNT` query. `Source.
+SearchMessages` also rejects a non-positive limit up front, because the
+repository reads `Limit <= 0` as "no LIMIT clause" — a negative limit would
+otherwise run unbounded and then slice with a negative bound.
+
+### 20. `slackdump_lower` exists because SQLite folds ASCII only
+
+SQLite's `LIKE` and `LOWER()` are ASCII-only, so accented text never matches
+across case: an upper-case accented term returns **zero** rows against a corpus
+that plainly contains it in lower case. Verify with
+`SELECT 'áéíóú' LIKE '%ÁÉÍÓÚ%'` — it is 0.
+
+`repository/searchfn.go` therefore registers a deterministic scalar function
+`slackdump_lower`, backed by Go's Unicode-aware `strings.ToLower`, and search
+compares `slackdump_lower(T.TXT)` against a query lowered the same way. It
+roughly doubles the cost of the scan, which is immaterial next to the rendering
+it feeds. No index is lost — `LIKE '%…%'` cannot use one anyway.
+
+Two caveats:
+
+- Registration is **process-global** and happens in `init()`. The name is
+  namespaced to make a collision with another `modernc.org/sqlite` consumer
+  implausible, and a collision panics rather than silently degrading to
+  unfolded search.
+- `strings.ToLower` is simple case mapping, not full case folding, so German
+  `ß`/`SS` still will not match. Fixing that needs `x/text/cases`; FTS5's
+  `unicode61` tokenizer would also solve it, along with diacritic stripping.
+
+### 21. User input must be escaped before it reaches `LIKE`
+
+`escapeLike` backslash-escapes `\`, `%` and `_`, and the statement must declare
+`ESCAPE '\'`. Both halves are load-bearing and were verified by mutation
+testing:
+
+- drop `escapeLike` and a query of `%` matches the entire archive;
+- drop the `ESCAPE` clause while keeping `escapeLike` and the inserted
+  backslash becomes a literal to match, so searching for a literal `%` silently
+  stops working. The `a literal percent is still findable` test row is the only
+  thing that catches this — it fails alone when `ESCAPE` is removed.
+
+Note that a literal `%` is common in real data — percentages appear routinely
+in ordinary conversation — so this is not a theoretical concern.
+
 ---
 
 ## Relevant Source Files

@@ -341,7 +341,9 @@ func (v *Viewer) channelPartial(w http.ResponseWriter, r *http.Request, id strin
 	pageView.Messages = it
 	pageView.Paging = pv
 	lg.DebugContext(ctx, "conversation", "id", id, "page", page)
-	if err := v.tmpl.ExecuteTemplate(w, "hx_conversation", pageView); err != nil {
+	// hx_conversation_swap, not hx_conversation: it also re-emits the search
+	// scope radios out of band, so "this conversation" tracks what is on screen.
+	if err := v.tmpl.ExecuteTemplate(w, "hx_conversation_swap", pageView); err != nil {
 		lg.ErrorContext(ctx, "ExecuteTemplate", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -574,21 +576,37 @@ type messageView struct {
 	Msg         slack.Message
 	ChannelID   string
 	Interactive bool
+	// HighlightTS is the timestamp of the currently active search hit, if
+	// any.  render_message compares it against Msg.Timestamp and adds the
+	// search-hit highlight class on a match.
+	HighlightTS string
 }
 
 type mainView struct {
 	channels
-	Name            string
-	Type            string
-	Interactive     bool
-	Messages        iter.Seq2[slack.Message, error]
-	ThreadMessages  iter.Seq2[slack.Message, error]
-	ThreadID        string
+	Name           string
+	Type           string
+	Interactive    bool
+	Messages       iter.Seq2[slack.Message, error]
+	ThreadMessages iter.Seq2[slack.Message, error]
+	ThreadID       string
+	// HighlightTS is the timestamp of the currently active search hit, if
+	// any; it is threaded through to render_message via msgview so the hit
+	// message's header gets the search-hit highlight class.
+	HighlightTS string
+	// ThreadInMain is true when a thread is rendered as the primary
+	// conversation (a search hit landed on a thread reply) rather than in the
+	// side thread panel.  hx_thread uses it to swap its close button for a
+	// "back to conversation" link, since the side panel here is still showing
+	// the search results and must not be closed by it.
+	ThreadInMain    bool
 	Conversation    slack.Channel
 	User            *slack.User
 	Alias           string // conversation alias
 	AliasError      string
 	CanAlias        bool        // if true, alias can be set for the channel
+	CanSearch       bool        // if true, the source supports searching
+	Search          *searchView // non-nil when a search results panel should render
 	CanvasActive    bool        // true when the canvas tab is the active tab
 	CanvasAvailable bool        // true when the canvas file exists in storage
 	Paging          *pagingView // non-nil only when the timeline is paged
@@ -616,6 +634,7 @@ func (v *Viewer) view() mainView {
 		Type:        v.src.Type().String(),
 		Interactive: v.rts.Interactive(),
 		CanAlias:    supportsAlias,
+		CanSearch:   v.canSearch(),
 	}
 }
 

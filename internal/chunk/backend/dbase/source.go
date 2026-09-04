@@ -314,6 +314,46 @@ func (s *Source) MessageOrdinal(ctx context.Context, channelID, ts string) (int6
 	return n - 1, nil
 }
 
+// SearchMessages returns up to limit messages whose text contains query,
+// newest first, across both channel timelines and thread replies.  An empty
+// channelID searches every conversation.  truncated reports whether more
+// matches existed than the limit allowed.
+//
+// Each returned message has Channel set, which is otherwise absent from stored
+// conversations.history payloads; that is what lets callers work with plain
+// slack.Message values instead of a dedicated hit type.
+func (s *Source) SearchMessages(ctx context.Context, query, channelID string, limit int) (msgs []slack.Message, truncated bool, err error) {
+	if limit <= 0 {
+		// A non-positive cap asks for nothing, so return nothing.  Guarding
+		// here also keeps the msgs[:limit] trim below in range: the repository
+		// treats a Limit of 0 or less as "no LIMIT clause", so a negative limit
+		// would otherwise run unbounded and then slice with a negative bound.
+		return nil, false, nil
+	}
+	mr := repository.NewMessageRepository()
+	// One row beyond the cap tells us the result was truncated without a
+	// second COUNT query.
+	it, err := mr.SearchMessages(ctx, s.conn, query, channelID, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	for dbm, err := range it {
+		if err != nil {
+			return nil, false, err
+		}
+		m, err := dbm.Val()
+		if err != nil {
+			return nil, false, err
+		}
+		m.Channel = dbm.ChannelID
+		msgs = append(msgs, m)
+	}
+	if len(msgs) > limit {
+		return msgs[:limit], true, nil
+	}
+	return msgs, false, nil
+}
+
 func (s *Source) AllThreadMessages(ctx context.Context, channelID, threadID string) (iter.Seq2[slack.Message, error], error) {
 	mr := repository.NewMessageRepository()
 	it, err := mr.AllForThread(ctx, s.conn, channelID, threadID)

@@ -133,9 +133,42 @@
         }
     }
 
+    // Step between search hits.  These only click the server-rendered links;
+    // the URLs and all state live on the server, so the keyboard shortcut and
+    // a mouse click take exactly the same path.
+    function onSearchKeydown(event) {
+        if (event.target.matches("input, textarea, select")) {
+            return;
+        }
+        var sel = null;
+        if (event.key === "n") {
+            sel = '.search-nav a[rel="next"]';
+        } else if (event.key === "N") {
+            sel = '.search-nav a[rel="prev"]';
+        } else {
+            return;
+        }
+        var link = qs(sel);
+        if (link) {
+            event.preventDefault();
+            link.click();
+        }
+    }
+
+    // An out-of-band swap is not a navigation, so the #anchor never fires and
+    // the activated message can land thousands of pixels outside the viewport.
+    // Bring it into view after the swap.
+    function scrollHitIntoView() {
+        var hit = qs("#conversation .message-header.search-hit");
+        if (hit) {
+            hit.scrollIntoView({block: "center"});
+        }
+    }
+
     function init() {
         document.addEventListener("click", onDocumentClick);
         document.addEventListener("keydown", onTabKeydown);
+        document.addEventListener("keydown", onSearchKeydown);
         syncActiveChannel();
     }
 
@@ -163,7 +196,22 @@
         }
     });
 
-    document.body.addEventListener("htmx:afterSettle", syncActiveChannel);
+    document.body.addEventListener("htmx:afterSettle", function () {
+        syncActiveChannel();
+        scrollHitIntoView();
+    });
+
+    // Anything swapped into the side panel should make it visible.  The panel
+    // is display:none until .container gets thread-open, and onDocumentClick
+    // only opens it for anchors with hx-target="#thread" — which the search
+    // box is not: it is an <input> firing on keyup, so results would load into
+    // a hidden panel.  Keying off the swap itself covers every producer.
+    document.body.addEventListener("htmx:afterSwap", function (event) {
+        var target = event.detail && event.detail.target;
+        if (target && target.id === "thread" && target.children.length > 0) {
+            openSidePanel();
+        }
+    });
 
     window.addEventListener("offline", function () {
         showConnectionError("Your browser is offline. Check your network connection.");

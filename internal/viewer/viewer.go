@@ -186,6 +186,7 @@ func New(ctx context.Context, addr string, r source.Sourcer, opts ...Option) (*V
 	mux.HandleFunc("DELETE /archives/{id}/alias/", v.aliasDeleteHandler)
 	mux.HandleFunc("GET /archives/{id}/{ts}", v.newFileHandler(v.postRedirectHandler))
 	mux.HandleFunc("GET /team/{user_id}", v.userHandler)
+	mux.HandleFunc("GET /search", v.searchHandler)
 	mux.Handle("GET /slackdump/file/{id}/{filename}", cacheMwareFunc(3*hour)(http.HandlerFunc(v.fileHandler)))
 	v.srv = &http.Server{
 		Addr:    addr,
