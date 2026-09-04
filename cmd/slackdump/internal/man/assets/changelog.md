@@ -1,5 +1,17 @@
 # What's New?
 
+## Unreleased
+
+### New Features
+
+- **Collapsible viewer sidebar groups**: `slackdump view` now lists
+  conversations in four collapsible groups — public channels, private channels,
+  group messages and direct messages — each sorted alphabetically and showing
+  its conversation count. The group containing the conversation you are viewing
+  is expanded automatically. The same grouping applies to static HTML output
+  from `slackdump convert -f html`, which needs no JavaScript to expand or
+  collapse.
+
 ## v4.4.0
 
 ### New Features

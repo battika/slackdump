@@ -13,6 +13,11 @@ The viewer uses a side panel for threads and user profiles, keeps the active
 channel highlighted while navigating, and reports connection problems if the
 local viewer server becomes unreachable.
 
+Conversations are listed in four collapsible sidebar groups — public channels,
+private channels, group messages and direct messages — each sorted
+alphabetically and labelled with its conversation count. The group holding the
+conversation you are viewing is expanded automatically.
+
 ## Usage
 
 ```bash

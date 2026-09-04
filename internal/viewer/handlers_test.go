@@ -70,6 +70,7 @@ func TestStaticHandler_ServesEmbeddedAssets(t *testing.T) {
 	}{
 		{path: "/static/htmx.min.js", want: "var htmx="},
 		{path: "/static/viewer.js", want: "function syncActiveChannel"},
+		{path: "/static/viewer.js", want: "function expandGroup"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -164,7 +165,7 @@ func TestUserHandler_RendersHTMXUserPanel(t *testing.T) {
 func newHandlerTestViewer(src *aliasSourceStub) *Viewer {
 	v := &Viewer{
 		src: src,
-		ch:  initChannels(src.chs),
+		ch:  initChannels(src.chs, st.NewUserIndex(src.users)),
 		um:  st.NewUserIndex(src.users),
 		lg:  slog.Default(),
 		r:   &renderer.Debug{},

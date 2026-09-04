@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -85,7 +86,7 @@ func TestRenderThread_StaticModeCloseLink(t *testing.T) {
 	src := newViewerRouteSource()
 	v := &Viewer{
 		src: src,
-		ch:  initChannels(src.chs),
+		ch:  initChannels(src.chs, st.NewUserIndex(src.users)),
 		um:  st.NewUserIndex(src.users),
 		lg:  slog.Default(),
 		r:   &renderer.Debug{},
@@ -138,7 +139,7 @@ func TestRenderChannel_StaticMode(t *testing.T) {
 	src := newViewerRouteSource()
 	v := &Viewer{
 		src: src,
-		ch:  initChannels(src.chs),
+		ch:  initChannels(src.chs, st.NewUserIndex(src.users)),
 		um:  st.NewUserIndex(src.users),
 		lg:  slog.Default(),
 		r:   &renderer.Debug{},
@@ -162,13 +163,54 @@ func TestRenderChannel_StaticMode(t *testing.T) {
 	if !strings.Contains(body, `aria-controls="tab-panel-conversation"`) || !strings.Contains(body, `role="tabpanel"`) {
 		t.Fatalf("RenderChannel() static mode should preserve tab ARIA, got: %q", body)
 	}
+	if !strings.Contains(body, `<details class="channel-group" id="channel-group-public" open>`) {
+		t.Fatalf("RenderChannel() static mode should render collapsible groups, got: %q", body)
+	}
+}
+
+// TestRenderChannel_SidebarGroups verifies that only the active channel's
+// group renders expanded, that groups render in public -> private -> mpim ->
+// dm order, and that channel links stay nested inside .channel-list.
+func TestRenderChannel_SidebarGroups(t *testing.T) {
+	src := newViewerRouteSource()
+	src.chs = append(src.chs, testChannel("D1", "", asIM, withUser("U1")))
+
+	v := newHandlerTestViewer(src)
+	var buf bytes.Buffer
+	if err := v.RenderChannel(context.Background(), "C1", &buf); err != nil {
+		t.Fatalf("RenderChannel() error = %v", err)
+	}
+	body := buf.String()
+
+	pub := strings.Index(body, `<details class="channel-group" id="channel-group-public" open>`)
+	dm := strings.Index(body, `<details class="channel-group" id="channel-group-dm">`)
+	if pub < 0 {
+		t.Fatalf("active channel's group should render expanded: %q", body)
+	}
+	if dm < 0 {
+		t.Fatalf("non-active group should render collapsed (no open attribute): %q", body)
+	}
+	if pub > dm {
+		t.Errorf("public group should render before dm group")
+	}
+	if !strings.Contains(body, `<span class="channel-group-label">Public channels</span>`) {
+		t.Errorf("RenderChannel() should render the group label: %q", body)
+	}
+	if !strings.Contains(body, `<span class="channel-group-count">1</span>`) {
+		t.Errorf("RenderChannel() should render the group count: %q", body)
+	}
+	// .channel-list is load-bearing: viewer.js selects .channel-sidebar .channel-list a
+	// and the sidebar link styling is scoped to .channel-list a.
+	if !regexp.MustCompile(`(?s)<div class="channel-list">\s*<a id="channel-link-C1"`).MatchString(body) {
+		t.Errorf("channel links must stay inside .channel-list: %q", body)
+	}
 }
 
 func TestRenderCanvas_StaticModePreservesSandbox(t *testing.T) {
 	src := newViewerRouteSource()
 	v := &Viewer{
 		src: src,
-		ch:  initChannels(src.chs),
+		ch:  initChannels(src.chs, st.NewUserIndex(src.users)),
 		um:  st.NewUserIndex(src.users),
 		lg:  slog.Default(),
 		r:   &renderer.Debug{},

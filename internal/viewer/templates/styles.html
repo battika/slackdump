@@ -113,21 +113,60 @@
     }
 
     /* Sidebar conversation list */
-    .channel-list {
-        margin-bottom: 2rem;
+    .channel-group {
+        margin-bottom: 1rem;
     }
 
     .channel-header {
         color: var(--sidebar-text-color);
-        padding-left: 1rem;
-        padding-right: 1rem;
-        margin-bottom: .5rem;
-        justify-content: space-between;
+        padding: .2rem 1rem;
+        display: flex;
         align-items: center;
+        cursor: pointer;
+        -webkit-user-select: none;
+        user-select: none;
+        list-style: none;
     }
 
-    .channel-header p {
+    .channel-header::-webkit-details-marker {
+        display: none;
+    }
+
+    .channel-header::before {
+        content: "";
+        flex: none;
+        width: 0;
+        height: 0;
+        margin-right: .5rem;
+        border-left: .35rem solid currentColor;
+        border-top: .25rem solid transparent;
+        border-bottom: .25rem solid transparent;
         opacity: .75;
+        transition: transform .15s ease;
+    }
+
+    .channel-group[open] > .channel-header::before {
+        transform: rotate(90deg);
+    }
+
+    .channel-group[open] > .channel-header {
+        margin-bottom: .5rem;
+    }
+
+    .channel-header:focus-visible {
+        outline: 2px solid var(--secondary-color);
+        outline-offset: -2px;
+    }
+
+    .channel-group-label {
+        flex: auto;
+        opacity: .75;
+    }
+
+    .channel-group-count {
+        flex: none;
+        opacity: .5;
+        font-size: .75rem;
     }
 
     .channel-list a {

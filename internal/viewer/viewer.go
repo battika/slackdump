@@ -17,6 +17,7 @@
 package viewer
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"html/template"
@@ -24,6 +25,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -103,7 +106,6 @@ func New(ctx context.Context, addr string, r source.Sourcer, opts ...Option) (*V
 	if err != nil {
 		return nil, err
 	}
-	cc := initChannels(all)
 
 	uu, err := r.Users(ctx)
 	if err != nil {
@@ -114,6 +116,10 @@ func New(ctx context.Context, addr string, r source.Sourcer, opts ...Option) (*V
 		}
 	}
 	um := st.NewUserIndex(uu)
+
+	// initChannels needs the user index to sort DMs and group messages by
+	// their resolved display names, so it must run after NewUserIndex.
+	cc := initChannels(all, um)
 
 	v := &Viewer{
 		src:  r,
@@ -235,7 +241,15 @@ func (c channels) find(id string) (slack.Channel, bool) {
 	return slack.Channel{}, false
 }
 
-func initChannels(c []slack.Channel) channels {
+// initChannels classifies channels into sidebar buckets and sorts each bucket
+// by canonical display name, case-insensitively, so the sidebar is scannable.
+// Sorting uses the canonical channel name rather than any user-defined alias:
+// sorting by alias would require re-sorting on every request and would
+// reshuffle the sidebar whenever an alias is edited.
+//
+// DM names resolve through um, so DM ordering degrades to raw user IDs for
+// sources with no user index; see AGENTS.md invariant 13.
+func initChannels(c []slack.Channel, um st.UserIndex) channels {
 	var cc channels
 	for _, ch := range c {
 		t := st.ChannelType(ch)
@@ -250,5 +264,48 @@ func initChannels(c []slack.Channel) channels {
 			cc.Public = append(cc.Public, ch)
 		}
 	}
+	byName := func(a, b slack.Channel) int {
+		if n := cmp.Compare(strings.ToLower(um.ChannelName(a)), strings.ToLower(um.ChannelName(b))); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.ID, b.ID)
+	}
+	for _, s := range []*[]slack.Channel{&cc.Public, &cc.Private, &cc.MPIM, &cc.DM} {
+		slices.SortStableFunc(*s, byName)
+	}
 	return cc
+}
+
+// channelGroup is one collapsible section of the sidebar channel list.
+type channelGroup struct {
+	Label string          // heading text, e.g. "Public channels"
+	ID    string          // stable DOM id suffix, e.g. "public"
+	Items []slack.Channel // channels, already in display order; aliases the viewer's channels slices — read-only, never sort or append in place
+	Open  bool            // true when this group renders expanded
+}
+
+// groups returns the sidebar channel groups in display order, omitting empty
+// ones.  The group containing activeID is marked Open; when activeID is empty
+// or matches no channel, the first non-empty group is opened instead, so the
+// sidebar is never rendered fully collapsed.
+func (c channels) groups(activeID string) []channelGroup {
+	gg := slices.DeleteFunc([]channelGroup{
+		{Label: "Public channels", ID: "public", Items: c.Public},
+		{Label: "Private channels", ID: "private", Items: c.Private},
+		{Label: "Group messages", ID: "mpim", Items: c.MPIM},
+		{Label: "Direct messages", ID: "dm", Items: c.DM},
+	}, func(g channelGroup) bool { return len(g.Items) == 0 })
+	if len(gg) == 0 {
+		return gg
+	}
+	if activeID != "" {
+		for i := range gg {
+			if slices.ContainsFunc(gg[i].Items, func(ch slack.Channel) bool { return ch.ID == activeID }) {
+				gg[i].Open = true
+				return gg
+			}
+		}
+	}
+	gg[0].Open = true
+	return gg
 }

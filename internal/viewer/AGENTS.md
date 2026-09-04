@@ -92,6 +92,47 @@ All colours must reference the CSS custom properties defined in `:root` (e.g. `-
 `--bg-color`). Dark mode is driven purely by `@media (prefers-color-scheme: dark)` overriding
 those variables. Hardcoded colour values break dark mode.
 
+### 11. Sidebar `.channel-list` class is load-bearing
+
+`channel_list` renders each sidebar group as `<details class="channel-group">` whose links are
+wrapped in an inner `<div class="channel-list">`. `viewer.js` selects
+`.channel-sidebar .channel-list a` in both `syncActiveChannel` and `onDocumentClick`, and the link
+styling in `styles.html` is scoped to `.channel-list a`. Renaming or removing that inner div
+silently breaks active-channel highlighting and all sidebar link styling.
+
+### 12. Sidebar collapse must never depend on JavaScript
+
+Groups collapse via native `<details>`/`<summary>`, and the open group is chosen server-side by
+`channels.groups`. Static HTML export renders with `.Interactive` false and its pages contain no
+`<script>` tags, so any JS-driven toggle would leave static output permanently expanded. `viewer.js`
+may only *enhance* the behaviour, never own it.
+
+The one enhancement it provides — `expandGroup` — must stay gated on `location.pathname` having
+changed. `syncActiveChannel` is registered on **every** `htmx:afterSettle`, including thread panel,
+user profile, alias form and tab swaps; expanding unconditionally there undoes a deliberate manual
+collapse on every unrelated interaction. Note that the case this serves is browser back/forward
+(htmx history restore), not sidebar clicks: a collapsed `<details>` does not expose its children, so
+click-navigation always finds the target group already open.
+
+`syncActiveChannel` also runs once from `init()` on first paint (`DOMContentLoaded`, or immediately
+if the document has already loaded). On that call `group.open = true` is a no-op — the server
+already rendered the active group open — but `expandGroup`'s other line,
+`link.scrollIntoView({block: "nearest"})`, still fires, scrolling the active channel link into view.
+That is what makes a deep link into a large group (hundreds of channels) land on the visible
+sidebar entry instead of requiring a manual scroll.
+
+### 13. Sidebar sorting depends on the source's user index
+
+`initChannels` sorts each bucket by `st.UserIndex.ChannelName`. DM names resolve through
+`ChannelName -> Username -> userattr`, so DM ordering depends on the user index being populated.
+
+For `source.Dump` archives with no `users.json`, `Users` returns `source.ErrNotFound`, `New`
+substitutes an empty index, and `userattr` falls back to `"<external>:<id>"` for every peer — so DM
+entries sort by raw user ID rather than display name. This is not a regression: those names already
+*displayed* that way. MPIM names come from the channel's `Purpose` field rather than the user index,
+so group messages are unaffected. `source.Export` always returns an index; `source.ChunkDir`
+propagates an unmapped error, so `New` fails outright rather than degrading.
+
 ---
 
 ## Adding a new handler — checklist
@@ -123,6 +164,24 @@ Use the `msgview` template func to construct one at the call site:
 | `.ChannelID` | `string` | Channel ID for reply-to anchor link; pass `""` to suppress the reply banner |
 
 Pass `""` as `$channelID` in the thread panel (`hx_thread`), where the parent message lives on a different page and the anchor link would be broken.
+
+### `channel_list`
+
+Ranges over `.Groups`, a `[]channelGroup` produced by `mainView.Groups` (`handlers.go`), which
+delegates to `channels.groups(m.Conversation.ID)` (`viewer.go`).
+
+| Field | Type | Purpose |
+|---|---|---|
+| `.Label` | `string` | Group heading, e.g. `Public channels` |
+| `.ID` | `string` | DOM id suffix — `public`, `private`, `mpim`, `dm` |
+| `.Items` | `[]slack.Channel` | Channels, pre-sorted alphabetically by `initChannels` |
+| `.Open` | `bool` | Renders the `open` attribute on `<details>` |
+
+Empty groups are omitted. Exactly one group is always `Open`, unless there are no channels at all.
+Inside the nested `range` over `.Items`, use `$.Interactive` — `.` is a `slack.Channel` there.
+
+`.Items` aliases the viewer's long-lived `channels` slices. Treat it as read-only: sorting or
+appending in place would corrupt the shared state for every other request.
 
 ---
 

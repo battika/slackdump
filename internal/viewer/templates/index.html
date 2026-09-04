@@ -56,31 +56,16 @@
 </html>
 
 {{ define "channel_list" }}
-{{ if ( or .Public .Private) }}
-<div class="channel-list">
-    <div class="channel-header">
-        <p>Channels</p>
+{{ range .Groups }}
+<details class="channel-group" id="channel-group-{{ .ID }}"{{ if .Open }} open{{ end }}>
+    <summary class="channel-header">
+        <span class="channel-group-label">{{ .Label }}</span>
+        <span class="channel-group-count">{{ len .Items }}</span>
+    </summary>
+    <div class="channel-list">
+        {{ range .Items }}{{ template "channel_link" (chlink . $.Interactive) }}{{ end }}
     </div>
-    {{ range $i, $el := .Public }}
-    {{ template "channel_link" (chlink $el $.Interactive) }}
-    {{ end }}
-    {{ range $i, $el := .Private }}
-    {{ template "channel_link" (chlink $el $.Interactive) }}
-    {{ end }}
-</div>
-{{ end }}
-{{ if (or .MPIM .DM) }}
-<div class="channel-list">
-    <div class="channel-header">
-        <p>Direct</p>
-    </div>
-	 {{ range $i, $el := .MPIM }}
-         {{ template "channel_link" (chlink $el $.Interactive) }}
-         {{ end }}
-         {{ range $i, $el := .DM }}
-         {{ template "channel_link" (chlink $el $.Interactive) }}
-         {{ end }}
-</div>
+</details>
 {{ end }}
 {{ end }}
 

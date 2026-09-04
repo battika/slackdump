@@ -2,6 +2,7 @@
     "use strict";
 
     var defaultConnectionMessage = "Cannot reach the viewer server. Check that it is running and try again.";
+    var lastSyncedPath = null;
 
     function qs(selector, root) {
         return (root || document).querySelector(selector);
@@ -38,6 +39,21 @@
         }
     }
 
+    // Expands the group containing the active channel.  The trigger that matters
+    // is htmx history restore (browser back/forward): a sidebar click cannot
+    // reach a link inside a collapsed <details>, so navigation by clicking
+    // always finds the group already open.
+    function expandGroup(link) {
+        if (!link) {
+            return;
+        }
+        var group = link.closest("details.channel-group");
+        if (group) {
+            group.open = true;
+            link.scrollIntoView({block: "nearest"});
+        }
+    }
+
     function syncActiveChannel() {
         var path = window.location.pathname;
         var match = null;
@@ -49,6 +65,10 @@
             }
         });
         setActiveChannel(match);
+        if (path !== lastSyncedPath) {
+            lastSyncedPath = path;
+            expandGroup(match);
+        }
     }
 
     function showConnectionError(message) {

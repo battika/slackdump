@@ -589,6 +589,14 @@ func (v *Viewer) view() mainView {
 	}
 }
 
+// Groups returns the sidebar channel groups, with the group containing the
+// currently displayed conversation expanded.  Conversation is the zero value on
+// the index and user-profile pages, in which case the first non-empty group is
+// expanded.
+func (m mainView) Groups() []channelGroup {
+	return m.channels.groups(m.Conversation.ID)
+}
+
 type aliasAction int
 
 const (
