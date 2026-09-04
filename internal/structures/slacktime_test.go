@@ -115,6 +115,20 @@ func Test_parseThreadID(t *testing.T) {
 			time.Time{},
 			true,
 		},
+		{
+			// Numeric but too short to carry a 10-digit seconds field: the
+			// fixed-offset slicing would read past the end.
+			"short numeric threadID",
+			args{"p123"},
+			time.Time{},
+			true,
+		},
+		{
+			"no microseconds",
+			args{"p1577694990"},
+			time.Time{},
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +139,32 @@ func Test_parseThreadID(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseThreadID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_ThreadIDtoTS(t *testing.T) {
+	tests := []struct {
+		name     string
+		threadID string
+		want     string
+	}{
+		{"valid thread ID", "p1577694990000400", "1577694990.000400"},
+		{"round trip of TStoThreadID", TStoThreadID("1710063528.879959"), "1710063528.879959"},
+		{"empty", "", ""},
+		{"missing p prefix", "1577694990000400", ""},
+		{"not numeric", "p1577694x90000400", ""},
+		// Numeric but too short to carry a 10-digit seconds field.  ParseInt
+		// accepts these, so without a length guard the fixed-offset slicing
+		// reads past the end and panics.
+		{"short numeric", "p123", ""},
+		{"no microseconds", "p1577694990", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ThreadIDtoTS(tt.threadID); got != tt.want {
+				t.Errorf("ThreadIDtoTS() = %q, want %q", got, tt.want)
 			}
 		})
 	}
