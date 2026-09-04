@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -406,6 +407,114 @@ func TestFileHandler_ReturnsNotFoundForMissingFile(t *testing.T) {
 	}
 }
 
+func TestChannelHandler_Paging(t *testing.T) {
+	newPagedViewer := func(t *testing.T, n, size int) *Viewer {
+		t.Helper()
+		mm := make([]slack.Message, 0, n)
+		for i := 1; i <= n; i++ {
+			mm = append(mm, slack.Message{Msg: slack.Msg{
+				Text:      "msg" + strconv.Itoa(i),
+				Timestamp: strconv.Itoa(100+i) + ".000000",
+				User:      "U1",
+			}})
+		}
+		src := newViewerRouteSource()
+		src.msgs = map[string][]slack.Message{"C1": mm}
+		v := newHandlerTestViewer(src)
+		v.pageSize = size
+		v.rts = renderer.NewRoutes(renderer.ModeLive, renderer.WithPaging(size > 0))
+		initTemplates(v)
+		return v
+	}
+
+	t.Run("defaults to the last page", func(t *testing.T) {
+		v := newPagedViewer(t, 5, 2)
+		req := httptest.NewRequest(http.MethodGet, "/archives/C1", nil)
+		rr := httptest.NewRecorder()
+
+		v.channelHandler(rr, req, "C1")
+
+		body := rr.Body.String()
+		if !strings.Contains(body, "msg5") {
+			t.Errorf("last page should contain msg5: %q", body)
+		}
+		if strings.Contains(body, "msg1") {
+			t.Errorf("last page should not contain msg1")
+		}
+		if !strings.Contains(body, "Page 3 of 3") {
+			t.Errorf("body should contain the page indicator: %q", body)
+		}
+	})
+
+	t.Run("explicit page", func(t *testing.T) {
+		v := newPagedViewer(t, 5, 2)
+		req := httptest.NewRequest(http.MethodGet, "/archives/C1?p=1", nil)
+		rr := httptest.NewRecorder()
+
+		v.channelHandler(rr, req, "C1")
+
+		body := rr.Body.String()
+		if !strings.Contains(body, "msg1") || !strings.Contains(body, "msg2") {
+			t.Errorf("page 1 should contain msg1 and msg2: %q", body)
+		}
+		if strings.Contains(body, "msg5") {
+			t.Errorf("page 1 should not contain msg5")
+		}
+	})
+
+	t.Run("out of range and junk page numbers clamp to the last page", func(t *testing.T) {
+		for _, p := range []string{"0", "999", "abc", "-2"} {
+			v := newPagedViewer(t, 5, 2)
+			req := httptest.NewRequest(http.MethodGet, "/archives/C1?p="+p, nil)
+			rr := httptest.NewRecorder()
+
+			v.channelHandler(rr, req, "C1")
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("p=%s status = %d, want 200", p, rr.Code)
+			}
+			if !strings.Contains(rr.Body.String(), "msg5") {
+				t.Errorf("p=%s should clamp to the last page", p)
+			}
+		}
+	})
+
+	t.Run("htmx partial carries the paging footer", func(t *testing.T) {
+		v := newPagedViewer(t, 5, 2)
+		req := httptest.NewRequest(http.MethodGet, "/archives/C1?p=2", nil)
+		req.Header.Set("HX-Request", "true")
+		rr := httptest.NewRecorder()
+
+		v.channelHandler(rr, req, "C1")
+
+		body := rr.Body.String()
+		if strings.Contains(body, "<!DOCTYPE html>") {
+			t.Errorf("HTMX request should return a partial")
+		}
+		if !strings.Contains(body, "Page 2 of 3") {
+			t.Errorf("partial should contain the page indicator: %q", body)
+		}
+	})
+
+	t.Run("paging disabled renders everything and no footer", func(t *testing.T) {
+		v := newPagedViewer(t, 5, 0)
+		req := httptest.NewRequest(http.MethodGet, "/archives/C1", nil)
+		rr := httptest.NewRecorder()
+
+		v.channelHandler(rr, req, "C1")
+
+		body := rr.Body.String()
+		if !strings.Contains(body, "msg1") || !strings.Contains(body, "msg5") {
+			t.Errorf("unpaged view should contain every message")
+		}
+		// Assert on the nav's aria-label, not on the "paging-nav" class name:
+		// the class appears in the inlined stylesheet on every full page.
+		if strings.Contains(body, `aria-label="Message pages"`) {
+			t.Errorf("unpaged view should not render the paging footer")
+		}
+	})
+}
+
 func TestRenderCanvasContent_MissingCanvasReturnsNotExist(t *testing.T) {
 	v := newHandlerTestViewer(&aliasSourceStub{
 		chs: []slack.Channel{{
@@ -421,5 +530,98 @@ func TestRenderCanvasContent_MissingCanvasReturnsNotExist(t *testing.T) {
 	err := v.RenderCanvasContent(t.Context(), "C1", httptest.NewRecorder())
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("RenderCanvasContent() error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestRenderThread_ShowsPageOfParent(t *testing.T) {
+	mm := make([]slack.Message, 0, 5)
+	for i := 1; i <= 5; i++ {
+		mm = append(mm, slack.Message{Msg: slack.Msg{
+			Text:      "msg" + strconv.Itoa(i),
+			Timestamp: strconv.Itoa(1700000000+i) + ".000000",
+		}})
+	}
+	// The parent sits at ordinal 2, i.e. the middle page.  A parent on page 1
+	// would not discriminate: a messagePageOf that ignored ts and always
+	// returned 1 would still satisfy every assertion below.
+	const parentTS = "1700000003.000000"
+	src := newViewerRouteSource()
+	src.msgs = map[string][]slack.Message{"C1": mm}
+	src.threads = map[string]map[string][]slack.Message{
+		"C1": {parentTS: {{Msg: slack.Msg{Text: "parent", Timestamp: parentTS, ThreadTimestamp: parentTS}}}},
+	}
+	v := newHandlerTestViewer(src)
+	v.pageSize = 2
+	v.rts = renderer.NewRoutes(renderer.ModeLive, renderer.WithPaging(true))
+	initTemplates(v)
+
+	var buf strings.Builder
+	if err := v.RenderThread(t.Context(), "C1", parentTS, &buf); err != nil {
+		t.Fatalf("RenderThread() error = %v", err)
+	}
+	body := buf.String()
+	if !strings.Contains(body, "msg3") || !strings.Contains(body, "msg4") {
+		t.Errorf("background timeline should show the parent's page: %q", body)
+	}
+	if strings.Contains(body, "msg1") {
+		t.Errorf("background timeline should not show the first page")
+	}
+	if strings.Contains(body, "msg5") {
+		t.Errorf("background timeline should not show the last page")
+	}
+	if !strings.Contains(body, "Page 2 of 3") {
+		t.Errorf("background timeline should report page 2 of 3: %q", body)
+	}
+}
+
+func TestPostRedirectHandler_ResolvesPage(t *testing.T) {
+	// Timestamps use a realistic 10-digit epoch base rather than "100+i": the
+	// p-link form flows through structures.ThreadIDtoTS, which slices
+	// threadID[1:11]/threadID[11:] on the assumption of a 10-digit seconds
+	// field followed by a 6-digit microsecond field. Shorter synthetic
+	// timestamps panic there on an unrelated, pre-existing bug that is out of
+	// scope for this task.
+	const base = 1700000000
+	mm := make([]slack.Message, 0, 5)
+	for i := 1; i <= 5; i++ {
+		mm = append(mm, slack.Message{Msg: slack.Msg{
+			Text:      "msg" + strconv.Itoa(i),
+			Timestamp: strconv.Itoa(base+i) + ".000000",
+		}})
+	}
+	src := newViewerRouteSource()
+	src.msgs = map[string][]slack.Message{"C1": mm}
+
+	tests := []struct {
+		name    string
+		size    int
+		ts      string
+		wantLoc string
+	}{
+		{"first message lands on page 1", 2, "p" + strconv.Itoa(base+1) + "000000", "/archives/C1?p=1#1700000001.000000"},
+		{"third message lands on page 2", 2, "p" + strconv.Itoa(base+3) + "000000", "/archives/C1?p=2#1700000003.000000"},
+		{"last message lands on the last page", 2, "p" + strconv.Itoa(base+5) + "000000", "/archives/C1?p=3#1700000005.000000"},
+		{"unpaged keeps the plain anchor", 0, "p" + strconv.Itoa(base+3) + "000000", "/archives/C1#1700000003.000000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := newHandlerTestViewer(src)
+			v.pageSize = tt.size
+			v.rts = renderer.NewRoutes(renderer.ModeLive, renderer.WithPaging(tt.size > 0))
+			initTemplates(v)
+
+			req := httptest.NewRequest(http.MethodGet, "/archives/C1/"+tt.ts, nil)
+			req.SetPathValue("ts", tt.ts)
+			rr := httptest.NewRecorder()
+
+			v.postRedirectHandler(rr, req, "C1")
+
+			if rr.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
+			}
+			if got := rr.Header().Get("Location"); got != tt.wantLoc {
+				t.Errorf("Location = %q, want %q", got, tt.wantLoc)
+			}
+		})
 	}
 }

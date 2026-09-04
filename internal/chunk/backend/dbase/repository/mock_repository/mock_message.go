@@ -104,6 +104,21 @@ func (mr *MockMessageRepositoryMockRecorder) Count(ctx, conn, channelID any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Count", reflect.TypeOf((*MockMessageRepository)(nil).Count), ctx, conn, channelID)
 }
 
+// CountBeforeID mocks base method.
+func (m *MockMessageRepository) CountBeforeID(ctx context.Context, conn sqlx.QueryerContext, channelID, ts string) (int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CountBeforeID", ctx, conn, channelID, ts)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CountBeforeID indicates an expected call of CountBeforeID.
+func (mr *MockMessageRepositoryMockRecorder) CountBeforeID(ctx, conn, channelID, ts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CountBeforeID", reflect.TypeOf((*MockMessageRepository)(nil).CountBeforeID), ctx, conn, channelID, ts)
+}
+
 // CountThread mocks base method.
 func (m *MockMessageRepository) CountThread(ctx context.Context, conn sqlx.QueryerContext, channelID, threadID string) (int64, error) {
 	m.ctrl.T.Helper()
@@ -261,6 +276,21 @@ func (m *MockMessageRepository) OneForChunk(ctx context.Context, conn sqlx.Query
 func (mr *MockMessageRepositoryMockRecorder) OneForChunk(ctx, conn, chunkID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OneForChunk", reflect.TypeOf((*MockMessageRepository)(nil).OneForChunk), ctx, conn, chunkID)
+}
+
+// PageForID mocks base method.
+func (m *MockMessageRepository) PageForID(ctx context.Context, conn sqlx.QueryerContext, channelID string, limit, offset int) (iter.Seq2[repository.DBMessage, error], error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PageForID", ctx, conn, channelID, limit, offset)
+	ret0, _ := ret[0].(iter.Seq2[repository.DBMessage, error])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// PageForID indicates an expected call of PageForID.
+func (mr *MockMessageRepositoryMockRecorder) PageForID(ctx, conn, channelID, limit, offset any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PageForID", reflect.TypeOf((*MockMessageRepository)(nil).PageForID), ctx, conn, channelID, limit, offset)
 }
 
 // Sorted mocks base method.

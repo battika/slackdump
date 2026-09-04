@@ -1,6 +1,9 @@
 package renderer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRoutes_RewriteSlackURL(t *testing.T) {
 	routes := NewRoutes(ModeLive,
@@ -85,4 +88,70 @@ func TestRoutes_StaticPaths(t *testing.T) {
 	if got := routes.File("F123", "a/b:c.txt"); got != "/files/F123/a_b_c.txt" {
 		t.Fatalf("File() sanitized = %q", got)
 	}
+}
+
+func TestRoutes_ChannelPage(t *testing.T) {
+	tests := []struct {
+		name string
+		rts  *Routes
+		id   string
+		page int
+		want string
+	}{
+		{"unpaged live", NewRoutes(ModeLive), "C1", 3, "/archives/C1"},
+		{"paged live", NewRoutes(ModeLive, WithPaging(true)), "C1", 3, "/archives/C1?p=3"},
+		{"paged live first page", NewRoutes(ModeLive, WithPaging(true)), "C1", 1, "/archives/C1?p=1"},
+		{"paged live page zero omits param", NewRoutes(ModeLive, WithPaging(true)), "C1", 0, "/archives/C1"},
+		{"static ignores paging", NewRoutes(ModeStatic, WithPaging(true)), "C1", 3, "/archives/C1/index.html"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rts.ChannelPage(tt.id, tt.page); got != tt.want {
+				t.Errorf("ChannelPage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRoutes_ChannelPageMessage(t *testing.T) {
+	r := NewRoutes(ModeLive, WithPaging(true))
+	const want = "/archives/C1?p=42#1738580940.349469"
+	got := r.ChannelPageMessage("C1", 42, "1738580940.349469")
+	if got != want {
+		t.Fatalf("ChannelPageMessage() = %q, want %q", got, want)
+	}
+	// The handler-facing form must be terminal: routing it back through the
+	// p-form redirect handler would loop forever.
+	if strings.Contains(got, "/p1738580940349469") {
+		t.Fatalf("ChannelPageMessage() must not return the p-form: %q", got)
+	}
+}
+
+func TestRoutes_ChannelMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		rts  *Routes
+		want string
+	}{
+		{"unpaged anchors directly", NewRoutes(ModeLive), "/archives/C1#1738580940.349469"},
+		{"paged routes through the redirect handler", NewRoutes(ModeLive, WithPaging(true)), "/archives/C1/p1738580940349469"},
+		{"static anchors directly", NewRoutes(ModeStatic, WithPaging(true)), "/archives/C1/index.html#1738580940.349469"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rts.ChannelMessage("C1", "1738580940.349469"); got != tt.want {
+				t.Errorf("ChannelMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// A timestamp TStoThreadID cannot convert must fall back to the anchor
+	// form rather than emitting a truncated p-link.
+	t.Run("malformed timestamp falls back to the anchor form", func(t *testing.T) {
+		r := NewRoutes(ModeLive, WithPaging(true))
+		const want = "/archives/C1#notatimestamp"
+		if got := r.ChannelMessage("C1", "notatimestamp"); got != want {
+			t.Errorf("ChannelMessage() = %q, want %q", got, want)
+		}
+	})
 }

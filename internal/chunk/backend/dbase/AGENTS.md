@@ -278,6 +278,33 @@ present for a consistent read while slackdump is running).
 
 See `dbase.go: dbInitCommands`.
 
+### 17. LIMIT/OFFSET are emitted as literals, not binds
+
+`queryParams.Limit` and `.Offset` are formatted into the statement with `fmt.Fprintf` rather
+than bound. `allOfTypeWhere` appends `qp.Binds` a **second** time on top of the binds
+`stmtLatestRows` already returned — the outer statement ends in `WHERE 1=1` and has no
+placeholders of its own, and the driver silently tolerates the surplus arguments. (Verified:
+`PageForID` sends 4 binds against 3 placeholders and works.) Adding new placeholders to that path
+would misalign the positional arguments. Both fields are `int`, so there is no injection surface.
+
+`OFFSET` is emitted only alongside a `LIMIT`; an offset with no limit is ignored, because SQLite
+rejects a bare `OFFSET` and no caller needs one.
+
+Note that `countTypeWhere` does **not** have this quirk — it calls `stmtLatestWhere` once and uses
+its binds directly, which is why `CountBeforeID` can safely take a second bind.
+
+### 18. Paging queries rely on ID being a total order
+
+`PageForID` paginates with `ORDER BY T.ID`. `DBMessage.userkey()` is `ID` alone and the dedup CTE
+groups by it with `MAX(CHUNK_ID)`, so every row in the result has a distinct `ID` — the ordering
+is total and pages cannot repeat or drop rows across `slackdump resume` overlap.
+
+Beware when writing tests: `fasttime.TS2int` concatenates the digits either side of the dot with
+**no decimal alignment**, so `"1.000000"` becomes `1000000`, which is *larger* than a fixture using
+short timestamps like `"123.456"` (→ `123456`). Ordering is only preserved between timestamps of
+equal digit width. Real Slack timestamps are always 10-digit seconds plus 6-digit microseconds, so
+production data is safe; synthetic fixtures must use the same shape or comparisons invert.
+
 ---
 
 ## Relevant Source Files

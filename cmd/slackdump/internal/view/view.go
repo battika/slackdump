@@ -44,10 +44,14 @@ var CmdView = &base.Command{
 	Run:        runView,
 }
 
-var listenAddr string
+var (
+	listenAddr string
+	pageSize   int
+)
 
 func init() {
 	CmdView.Flag.StringVar(&listenAddr, "listen", "127.0.0.1:8080", "address to listen on")
+	CmdView.Flag.IntVar(&pageSize, "page-size", 100, "number of messages per channel page, 0 to disable paging")
 }
 
 func runView(ctx context.Context, cmd *base.Command, args []string) error {
@@ -72,7 +76,7 @@ func runView(ctx context.Context, cmd *base.Command, args []string) error {
 	defer src.Close()
 
 	stoppb := bootstrap.TimedSpinner(ctx, os.Stdout, "Slackdump Viewer is loading files", -1, 0)
-	v, err := viewer.New(ctx, listenAddr, src)
+	v, err := viewer.New(ctx, listenAddr, src, viewer.WithPageSize(pageSize))
 	if err != nil {
 		base.SetExitStatus(base.SApplicationError)
 		return err

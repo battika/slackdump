@@ -30,3 +30,13 @@ func TestGlob(t *testing.T) {
 		t.Errorf("expected match, got %v", match)
 	}
 }
+
+func TestCmdView_PageSizeFlag(t *testing.T) {
+	f := CmdView.Flag.Lookup("page-size")
+	if f == nil {
+		t.Fatal("view command should define a -page-size flag")
+	}
+	if f.DefValue != "100" {
+		t.Errorf("-page-size default = %q, want %q", f.DefValue, "100")
+	}
+}

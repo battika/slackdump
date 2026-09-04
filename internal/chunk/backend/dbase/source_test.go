@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"iter"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1110,6 +1111,97 @@ func TestSource_Sessions(t *testing.T) {
 				return
 			}
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// pagingTestMessages is the shared fixture for the Source paging tests.  The
+// timestamps are deliberately realistic (10-digit seconds, 6-digit
+// microseconds): fasttime.TS2int concatenates the digits either side of the
+// dot without decimal alignment, so ordering only holds between timestamps of
+// equal digit width.
+var pagingTestMessages = []slack.Message{
+	{Msg: slack.Msg{Timestamp: "1234567890.000001", Text: "one"}},
+	{Msg: slack.Msg{Timestamp: "1234567890.000002", Text: "two"}},
+	{Msg: slack.Msg{Timestamp: "1234567890.000003", Text: "three"}},
+}
+
+// newPagingSource returns a Source over a database holding
+// pagingTestMessages in channel C01.
+func newPagingSource(t *testing.T) *Source {
+	t.Helper()
+	conn := testDB(t)
+	prepTestChunk(&chunk.Chunk{Type: chunk.CMessages, ChannelID: "C01", Messages: pagingTestMessages})(t, conn)
+	return &Source{conn: conn, canClose: true}
+}
+
+// collectText drains it, returning the text of each message.
+func collectText(t *testing.T, it iter.Seq2[slack.Message, error]) []string {
+	t.Helper()
+	var got []string
+	for m, err := range it {
+		if err != nil {
+			t.Fatalf("iteration error = %v", err)
+		}
+		got = append(got, m.Text)
+	}
+	return got
+}
+
+func TestSource_CountMessages(t *testing.T) {
+	got, err := newPagingSource(t).CountMessages(t.Context(), "C01")
+	if err != nil {
+		t.Fatalf("CountMessages() error = %v", err)
+	}
+	if got != 3 {
+		t.Errorf("CountMessages() = %d, want 3", got)
+	}
+}
+
+func TestSource_MessagesPage(t *testing.T) {
+	tests := []struct {
+		name   string
+		limit  int
+		offset int
+		want   []string
+	}{
+		{"first window", 2, 0, []string{"one", "two"}},
+		{"second window", 2, 2, []string{"three"}},
+		{"offset past the end", 2, 99, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it, err := newPagingSource(t).MessagesPage(t.Context(), "C01", tt.limit, tt.offset)
+			if err != nil {
+				t.Fatalf("MessagesPage() error = %v", err)
+			}
+			if got := collectText(t, it); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("MessagesPage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSource_MessageOrdinal(t *testing.T) {
+	tests := []struct {
+		name string
+		ts   string
+		want int64
+	}{
+		{"first message", "1234567890.000001", 0},
+		{"second message", "1234567890.000002", 1},
+		{"third message", "1234567890.000003", 2},
+		{"older than everything", "1.000000", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newPagingSource(t).MessageOrdinal(t.Context(), "C01", tt.ts)
+			if err != nil {
+				t.Fatalf("MessageOrdinal() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("MessageOrdinal() = %d, want %d", got, tt.want)
+			}
 		})
 	}
 }

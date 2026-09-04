@@ -18,6 +18,17 @@ private channels, group messages and direct messages — each sorted
 alphabetically and labelled with its conversation count. The group holding the
 conversation you are viewing is expanded automatically.
 
+Long conversations are shown 100 messages at a time, newest page first, with
+"Older" and "Newer" links at the bottom of the message list. The page number is
+part of the URL (`?p=12`), so any page can be bookmarked, and links to
+individual messages resolve to the page holding them. Use `-page-size` to
+change how many messages a page holds, or `-page-size 0` to render whole
+conversations at once:
+
+```bash
+slackdump view -page-size 250 <directory_or_file>
+```
+
 ## Usage
 
 ```bash

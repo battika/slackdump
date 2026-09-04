@@ -11,6 +11,7 @@
 | `viewer.go` | `Viewer` struct, `New()`, HTTP server setup, route registration, channel classification |
 | `handlers.go` | All HTTP handlers, `mainView` data struct, `setConversation` helper |
 | `filestorage.go` | `fileByIDStorage` optional extension interface + `fileByID` helper |
+| `paging.go` | `messagePager` extension interface, page arithmetic, `pageFromSeq` fallback, `channelPage`, `messagePageOf` |
 | `template.go` | Template compilation (`initTemplates`), FuncMap, sender classification |
 | `templates/index.html` | All HTML template defines (full page + HTMX partials + JS) |
 | `templates/styles.html` | All CSS (single `hx_css` define, CSS variables, dark mode) |
@@ -132,6 +133,59 @@ entries sort by raw user ID rather than display name. This is not a regression: 
 *displayed* that way. MPIM names come from the channel's `Purpose` field rather than the user index,
 so group messages are unaffected. `source.Export` always returns an index; `source.ChunkDir`
 propagates an unmapped error, so `New` fails outright rather than degrading.
+
+### 14. Paging is opt-in and never applies to static output
+
+`viewerOptions.pageSize` defaults to **0 (disabled)**, and `New` additionally forces it to 0
+whenever `mode == renderer.ModeStatic`. `internal/convert/html.go` therefore gets whole-timeline
+pages without asking for anything, and its output is unchanged by paging. Only `slackdump view`
+opts in, via `-page-size` (default 100, `0` to disable).
+
+A nil `mainView.Paging` means the timeline is unpaged: `paging_nav` renders nothing and the output
+is byte-identical to the pre-paging viewer. Do not give `Paging` a non-nil zero value as a
+"default" — the nil check *is* the switch.
+
+### 15. `ChannelMessage` and `ChannelPageMessage` are not interchangeable
+
+With paging on, `Routes.ChannelMessage` returns the `p`-permalink form
+(`/archives/{id}/p1710063528879959`), because the page a message lives on is only known
+server-side and resolving it per message would cost one query per rendered message. That URL is
+served by `postRedirectHandler`.
+
+`postRedirectHandler` must therefore redirect using `Routes.ChannelPageMessage`, which returns the
+terminal `/archives/{id}?p=N#ts`. Using `ChannelMessage` there sends the handler back to itself —
+an infinite redirect. This is not hypothetical: it shipped briefly during development and was
+caught by a live `curl` returning `303` to the request URL. **Templates use `ChannelMessage`;
+handlers use `ChannelPageMessage`.**
+
+### 16. `pageFromSeq` walks the sequence exactly once
+
+The `iter.Seq2` returned by `AllMessages` is backed by live `sql.Rows` for database sources;
+iterating it a second time yields nothing. `pageFromSeq` keeps two buffers — the requested window
+and a rolling window of the trailing page — because an out-of-range page always clamps to the
+*last* page, so one pass covers every outcome. The rolling buffer is full-size, so it is trimmed to
+`total - (pages-1)*size` before returning. Do not "simplify" this into a count pass followed by a
+fetch pass.
+
+### 17. The paging footer is a sibling of `.message-list`
+
+`.message-list` is `flex: 1; overflow-y: auto`. `paging_nav` is rendered by
+`hx_conversation_body` *after* `message_list`, not inside it; moving it inside makes the controls
+scroll away with the messages. Its links carry the same HTMX attributes as the tab buttons, and
+because `channelPartial` re-executes `hx_conversation` on every swap, each swap ships a freshly
+computed footer — that is what makes clicking "Older" repeatedly work.
+
+### 18. Non-database sources scan the timeline twice on a thread deep link
+
+`messagePager` is implemented only by `internal/chunk/backend/dbase`. For export, dump and
+chunkdir archives, `RenderThread` scans the channel once in `messagePageOf` and again in
+`channelPage`'s `pageFromSeq` fallback.
+
+This is a deliberate trade-off, not an oversight. Before paging, that path made one scan but
+rendered the *entire* timeline (8.97 MB of HTML for a 9,550-message channel); it now makes two
+scans and renders 100 messages, which is faster overall because rendering dominated. Collapsing
+the two scans would mean threading an ordinal through `pageFromSeq`, and that complexity is not
+worth it unless profiling on a large export says otherwise.
 
 ---
 

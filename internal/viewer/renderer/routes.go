@@ -39,6 +39,10 @@ type Routes struct {
 	mode          Mode
 	workspaceHost string
 	liveHost      string
+	// paged is true when the live viewer serves channels in pages.  It changes
+	// ChannelMessage to emit the self-resolving p-form, because the page a
+	// message lives on is only known server-side.
+	paged bool
 }
 
 type RouteOption func(*Routes)
@@ -57,6 +61,14 @@ func WithWorkspaceURL(wspURL string) RouteOption {
 func WithLiveHost(host string) RouteOption {
 	return func(r *Routes) {
 		r.liveHost = host
+	}
+}
+
+// WithPaging tells the route generator that channel timelines are served in
+// pages.  It has no effect in [ModeStatic], where paging is always off.
+func WithPaging(paged bool) RouteOption {
+	return func(r *Routes) {
+		r.paged = paged
 	}
 }
 
@@ -79,8 +91,33 @@ func (r *Routes) Channel(id string) string {
 	return routePath("archives", id)
 }
 
+// ChannelMessage returns the link used by templates to point at a single
+// message.  With paging enabled the page containing the message is not known
+// at render time, so it returns the "p" permalink form, which
+// postRedirectHandler resolves to the correct page.
 func (r *Routes) ChannelMessage(id, ts string) string {
+	if r != nil && r.paged && r.mode == ModeLive {
+		if tid := structures.TStoThreadID(ts); tid != "" {
+			return routePath("archives", id, tid)
+		}
+	}
 	return withFragment(r.Channel(id), ts)
+}
+
+// ChannelPage returns the link to a specific page of a channel.  A page of 0
+// or less, or paging being disabled, yields the plain channel link.
+func (r *Routes) ChannelPage(id string, page int) string {
+	if r == nil || !r.paged || r.mode == ModeStatic || page < 1 {
+		return r.Channel(id)
+	}
+	return fmt.Sprintf("%s?p=%d", r.Channel(id), page)
+}
+
+// ChannelPageMessage returns the terminal link to a message on a known page.
+// Handlers must use this rather than [Routes.ChannelMessage], which would
+// redirect back into the resolving handler and loop.
+func (r *Routes) ChannelPageMessage(id string, page int, ts string) string {
+	return withFragment(r.ChannelPage(id, page), ts)
 }
 
 func (r *Routes) Thread(id, ts string) string {

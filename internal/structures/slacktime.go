@@ -78,3 +78,17 @@ func ThreadIDtoTS(threadID string) string {
 	}
 	return threadID[1:11] + "." + threadID[11:]
 }
+
+// TStoThreadID converts a Slack timestamp (1577694990.000400) to the thread ID
+// form used in Slack permalinks (p1577694990000400).  It is the inverse of
+// [ThreadIDtoTS] and returns an empty string if ts is not a valid timestamp.
+func TStoThreadID(ts string) string {
+	sec, micro, found := strings.Cut(ts, ".")
+	if !found || sec == "" || micro == "" {
+		return ""
+	}
+	if _, err := strconv.ParseInt(sec+micro, 10, 64); err != nil {
+		return ""
+	}
+	return "p" + sec + micro
+}

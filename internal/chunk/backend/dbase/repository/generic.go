@@ -266,6 +266,14 @@ type queryParams struct {
 	Binds        []any
 	OrderBy      []string
 	UserKeyOrder bool
+	// Limit, when > 0, caps the number of returned rows; Offset then skips
+	// that many rows first.  Offset without Limit is ignored.  Both are
+	// emitted as integer literals rather than binds: allOfTypeWhere appends
+	// qp.Binds a second time on top of the binds stmtLatestRows already
+	// returned, and adding placeholders to that path would misalign the
+	// positional arguments.  Both are ints, so there is no injection surface.
+	Limit  int
+	Offset int
 }
 
 // allOfTypeWhere returns an iterator that yields all latest rows type T that
@@ -290,6 +298,15 @@ func (r genericRepository[T]) allOfTypeWhere(ctx context.Context, conn sqlx.Quer
 	} else if len(qp.OrderBy) > 0 {
 		buf.WriteString(" ORDER BY ")
 		buf.WriteString(strings.Join(qp.OrderBy, ","))
+	}
+
+	// OFFSET is only meaningful alongside a LIMIT, and every caller that
+	// offsets also limits.
+	if qp.Limit > 0 {
+		fmt.Fprintf(&buf, " LIMIT %d", qp.Limit)
+		if qp.Offset > 0 {
+			fmt.Fprintf(&buf, " OFFSET %d", qp.Offset)
+		}
 	}
 
 	stmt := buf.String()

@@ -97,6 +97,7 @@
 {{ define "hx_conversation_body" }}
 {{ template "conversation_header" . }}
 {{ template "message_list" . }}
+{{ template "paging_nav" . }}
 {{ end }}
 
 
@@ -182,6 +183,24 @@
 {{end}}
 </div>
 {{end}}
+
+{{ define "paging_nav" }}
+{{ if .Paging }}
+<nav class="paging-nav" aria-label="Message pages">
+    {{ if .Paging.PrevURL }}
+    <a class="paging-link" href="{{ .Paging.PrevURL }}"{{ if .Interactive }} hx-get="{{ .Paging.PrevURL }}" hx-target="#conversation" hx-swap="innerHTML" hx-push-url="true"{{ end }} rel="prev">&larr; Older</a>
+    {{ else }}
+    <span class="paging-link disabled" aria-hidden="true">&larr; Older</span>
+    {{ end }}
+    <span class="paging-status">Page {{ .Paging.Page }} of {{ .Paging.Pages }} ({{ .Paging.Total }} messages)</span>
+    {{ if .Paging.NextURL }}
+    <a class="paging-link" href="{{ .Paging.NextURL }}"{{ if .Interactive }} hx-get="{{ .Paging.NextURL }}" hx-target="#conversation" hx-swap="innerHTML" hx-push-url="true"{{ end }} rel="next">Newer &rarr;</a>
+    {{ else }}
+    <span class="paging-link disabled" aria-hidden="true">Newer &rarr;</span>
+    {{ end }}
+</nav>
+{{ end }}
+{{ end }}
 
 
 {{define "hx_thread"}}

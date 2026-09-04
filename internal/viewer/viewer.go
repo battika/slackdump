@@ -68,6 +68,10 @@ type Viewer struct {
 	tmpl *template.Template
 	mode renderer.Mode
 	rts  *renderer.Routes
+	// pageSize is the number of channel messages per page; 0 disables paging
+	// and renders the whole timeline, which is the default and what the static
+	// HTML converter relies on.
+	pageSize int
 
 	// handles
 	srv *http.Server
@@ -78,12 +82,21 @@ type Viewer struct {
 type Option func(*viewerOptions)
 
 type viewerOptions struct {
-	mode renderer.Mode
+	mode     renderer.Mode
+	pageSize int
 }
 
 func WithMode(mode renderer.Mode) Option {
 	return func(o *viewerOptions) {
 		o.mode = mode
+	}
+}
+
+// WithPageSize sets the number of channel messages rendered per page.  Zero or
+// less disables paging.  Paging is always disabled in [renderer.ModeStatic].
+func WithPageSize(n int) Option {
+	return func(o *viewerOptions) {
+		o.pageSize = n
 	}
 }
 
@@ -100,6 +113,11 @@ func New(ctx context.Context, addr string, r source.Sourcer, opts ...Option) (*V
 	options := viewerOptions{mode: renderer.ModeLive}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	// Static HTML output is never paged: convert -html emits one page per
+	// channel and its routes have no query strings.
+	if options.mode == renderer.ModeStatic {
+		options.pageSize = 0
 	}
 
 	all, err := r.Channels(ctx)
@@ -122,13 +140,14 @@ func New(ctx context.Context, addr string, r source.Sourcer, opts ...Option) (*V
 	cc := initChannels(all, um)
 
 	v := &Viewer{
-		src:  r,
-		ch:   cc,
-		um:   um,
-		lg:   slog.Default(),
-		mode: options.mode,
+		src:      r,
+		ch:       cc,
+		um:       um,
+		lg:       slog.Default(),
+		mode:     options.mode,
+		pageSize: options.pageSize,
 	}
-	rtOpts := []renderer.RouteOption{}
+	rtOpts := []renderer.RouteOption{renderer.WithPaging(options.pageSize > 0)}
 	if addr != "" {
 		rtOpts = append(rtOpts, renderer.WithLiveHost(normalise(addr)))
 	}

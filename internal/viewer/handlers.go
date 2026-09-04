@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -44,22 +45,31 @@ func (v *Viewer) RenderIndex(ctx context.Context, w io.Writer) error {
 	return v.tmpl.ExecuteTemplate(w, "index.html", page)
 }
 
-// RenderChannel renders the full conversation page for channelID to w.
+// RenderChannel renders the full conversation page for channelID to w.  It
+// renders the default page, which is the newest one when paging is enabled and
+// the entire timeline when it is not.
 func (v *Viewer) RenderChannel(ctx context.Context, channelID string, w io.Writer) error {
+	return v.renderChannelPage(ctx, channelID, 0, w)
+}
+
+// renderChannelPage renders one page of a conversation.  A page of 0 or less
+// selects the newest page.
+func (v *Viewer) renderChannelPage(ctx context.Context, channelID string, page int, w io.Writer) error {
 	ci, err := v.src.ChannelInfo(ctx, channelID)
 	if err != nil {
 		return err
 	}
-	it, err := v.allMessagesOrEmpty(ctx, channelID)
+	it, pv, err := v.channelPage(ctx, channelID, page)
 	if err != nil {
 		return err
 	}
-	page := v.view()
-	if err := v.setConversation(&page, ci); err != nil {
+	pageView := v.view()
+	if err := v.setConversation(&pageView, ci); err != nil {
 		return err
 	}
-	page.Messages = it
-	return v.tmpl.ExecuteTemplate(w, "index.html", page)
+	pageView.Messages = it
+	pageView.Paging = pv
+	return v.tmpl.ExecuteTemplate(w, "index.html", pageView)
 }
 
 // RenderThread renders the full thread page for (channelID, threadTS) to w.
@@ -81,11 +91,19 @@ func (v *Viewer) RenderThread(ctx context.Context, channelID, threadTS string, w
 	page.ThreadID = threadTS
 
 	// fetch channel messages so the full page renders correctly on deep link.
-	itMsg, err := v.src.AllMessages(ctx, channelID)
+	// Show the page the thread parent lives on rather than the newest page; a
+	// thread-only archive has no parent in the channel timeline, in which case
+	// messagePageOf walks off the end and channelPage clamps to the last page.
+	parentPage, err := v.messagePageOf(ctx, channelID, threadTS)
+	if err != nil {
+		return err
+	}
+	itMsg, pv, err := v.channelPage(ctx, channelID, parentPage)
 	if err != nil {
 		return err
 	}
 	page.Messages = itMsg
+	page.Paging = pv
 
 	return v.tmpl.ExecuteTemplate(w, "index.html", page)
 }
@@ -114,11 +132,12 @@ func (v *Viewer) RenderCanvas(ctx context.Context, channelID string, w io.Writer
 	page.CanvasActive = true
 
 	// fetch messages so the full page renders correctly on deep link.
-	itMsg, err := v.allMessagesOrEmpty(ctx, channelID)
+	itMsg, pv, err := v.channelPage(ctx, channelID, 0)
 	if err != nil {
 		return err
 	}
 	page.Messages = itMsg
+	page.Paging = pv
 
 	return v.tmpl.ExecuteTemplate(w, "index.html", page)
 }
@@ -160,17 +179,18 @@ func (v *Viewer) indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (v *Viewer) channelHandler(w http.ResponseWriter, r *http.Request, id string) {
+	page := requestedPage(r)
 	if isHXRequest(r) {
-		v.channelPartial(w, r, id)
+		v.channelPartial(w, r, id, page)
 		return
 	}
-	if err := v.RenderChannel(r.Context(), id, w); err != nil {
+	if err := v.renderChannelPage(r.Context(), id, page, w); err != nil {
 		lg := v.lg.With("in", "channelHandler", "channel", id)
 		if errors.Is(err, source.ErrNotFound) {
 			http.NotFound(w, r)
 			return
 		}
-		lg.ErrorContext(r.Context(), "RenderChannel", "error", err)
+		lg.ErrorContext(r.Context(), "renderChannelPage", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -195,7 +215,15 @@ func (v *Viewer) postRedirectHandler(w http.ResponseWriter, r *http.Request, id 
 			// https: //ora600.slack.com/archives/DHMAB25DY/p1710063528879959
 			lg.Debug("redirecting to channel message", "ts", ts)
 			ts = structures.ThreadIDtoTS(ts)
-			http.Redirect(w, r, v.rts.ChannelMessage(id, ts), http.StatusSeeOther)
+			page, err := v.messagePageOf(r.Context(), id, ts)
+			if err != nil {
+				lg.ErrorContext(r.Context(), "messagePageOf", "error", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// ChannelPageMessage, not ChannelMessage: the latter returns the
+			// p-form that routed us here and would redirect in a loop.
+			http.Redirect(w, r, v.rts.ChannelPageMessage(id, page, ts), http.StatusSeeOther)
 		}
 		return
 	}
@@ -284,17 +312,17 @@ func (v *Viewer) canvasContentHandler(w http.ResponseWriter, r *http.Request, id
 
 // ── HTMX-only partial helpers (live mode) ────────────────────────────────────
 
-func (v *Viewer) channelPartial(w http.ResponseWriter, r *http.Request, id string) {
+func (v *Viewer) channelPartial(w http.ResponseWriter, r *http.Request, id string, page int) {
 	ctx := r.Context()
 	lg := v.lg.With("in", "channelPartial", "channel", id)
 
-	it, err := v.src.AllMessages(ctx, id)
+	it, pv, err := v.channelPage(ctx, id, page)
 	if err != nil {
 		if errors.Is(err, source.ErrNotFound) {
 			http.NotFound(w, r)
 			return
 		}
-		lg.ErrorContext(ctx, "AllMessages", "error", err)
+		lg.ErrorContext(ctx, "channelPage", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -304,15 +332,16 @@ func (v *Viewer) channelPartial(w http.ResponseWriter, r *http.Request, id strin
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	page := v.view()
-	if err := v.setConversation(&page, ci); err != nil {
+	pageView := v.view()
+	if err := v.setConversation(&pageView, ci); err != nil {
 		lg.ErrorContext(ctx, "setConversation", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	page.Messages = it
-	lg.DebugContext(ctx, "conversation", "id", id)
-	if err := v.tmpl.ExecuteTemplate(w, "hx_conversation", page); err != nil {
+	pageView.Messages = it
+	pageView.Paging = pv
+	lg.DebugContext(ctx, "conversation", "id", id, "page", page)
+	if err := v.tmpl.ExecuteTemplate(w, "hx_conversation", pageView); err != nil {
 		lg.ErrorContext(ctx, "ExecuteTemplate", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -559,9 +588,10 @@ type mainView struct {
 	User            *slack.User
 	Alias           string // conversation alias
 	AliasError      string
-	CanAlias        bool // if true, alias can be set for the channel
-	CanvasActive    bool // true when the canvas tab is the active tab
-	CanvasAvailable bool // true when the canvas file exists in storage
+	CanAlias        bool        // if true, alias can be set for the channel
+	CanvasActive    bool        // true when the canvas tab is the active tab
+	CanvasAvailable bool        // true when the canvas file exists in storage
+	Paging          *pagingView // non-nil only when the timeline is paged
 }
 
 type aliaser interface {
@@ -649,19 +679,27 @@ func isHXRequest(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
 }
 
+// requestedPage reads the ?p= page number.  Absent and malformed values yield
+// 0, which channelPage resolves to the newest page.  Well-formed but
+// out-of-range values are returned unchanged and clamped later by clampPage.
+// Either way, a hand-edited URL never produces an error page.
+func requestedPage(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("p"))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // isInvalid returns true if the provided path component is not web-safe.
 func isInvalid(pcomp string) bool {
 	return strings.Contains(pcomp, "..") || strings.HasPrefix(pcomp, "~") || strings.Contains(pcomp, "/") || strings.Contains(pcomp, "\\")
 }
 
-func emptyMessages() iter.Seq2[slack.Message, error] {
-	return func(func(slack.Message, error) bool) {}
-}
-
 func (v *Viewer) allMessagesOrEmpty(ctx context.Context, channelID string) (iter.Seq2[slack.Message, error], error) {
 	it, err := v.src.AllMessages(ctx, channelID)
 	if errors.Is(err, source.ErrNotFound) {
-		return emptyMessages(), nil
+		return sliceMessages(nil), nil
 	}
 	return it, err
 }

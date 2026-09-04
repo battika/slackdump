@@ -136,8 +136,16 @@ type MessageRepository interface {
 	Getter[DBMessage]
 	// Count returns the number of messages in a channel.
 	Count(ctx context.Context, conn sqlx.QueryerContext, channelID string) (int64, error)
+	// CountBeforeID returns the number of channel-timeline messages with a
+	// timestamp at or before ts.  The result is 1-based for an existing
+	// message: the oldest message in the channel returns 1.
+	CountBeforeID(ctx context.Context, conn sqlx.QueryerContext, channelID, ts string) (int64, error)
 	// AllForID returns all messages in a channel.
 	AllForID(ctx context.Context, conn sqlx.QueryerContext, channelID string) (iter.Seq2[DBMessage, error], error)
+	// PageForID returns a window of the channel timeline, ordered oldest
+	// first.  A limit of 0 means no limit; an offset of 0 starts at the
+	// beginning.
+	PageForID(ctx context.Context, conn sqlx.QueryerContext, channelID string, limit, offset int) (iter.Seq2[DBMessage, error], error)
 	// CountThread returns the number of messages in a thread.
 	CountThread(ctx context.Context, conn sqlx.QueryerContext, channelID, threadID string) (int64, error)
 	// AllForThread returns all messages in a thread, including parent message.
@@ -183,6 +191,21 @@ func (r messageRepository) Count(ctx context.Context, conn sqlx.QueryerContext, 
 	)
 }
 
+func (r messageRepository) CountBeforeID(ctx context.Context, conn sqlx.QueryerContext, channelID, ts string) (int64, error) {
+	id, err := fasttime.TS2int(ts)
+	if err != nil {
+		return 0, fmt.Errorf("countBeforeID fasttime: %w", err)
+	}
+	return r.countTypeWhere(
+		ctx,
+		conn,
+		queryParams{
+			Where: "T.CHANNEL_ID = ? AND T.ID <= ?" + channelTimelineCondition,
+			Binds: []any{channelID, id}},
+		chunk.CMessages, chunk.CThreadMessages,
+	)
+}
+
 func (r messageRepository) AllForID(ctx context.Context, conn sqlx.QueryerContext, channelID string) (iter.Seq2[DBMessage, error], error) {
 	return r.allOfTypeWhere(
 		ctx,
@@ -191,6 +214,21 @@ func (r messageRepository) AllForID(ctx context.Context, conn sqlx.QueryerContex
 			Where:        "T.CHANNEL_ID = ?" + channelTimelineCondition,
 			Binds:        []any{channelID},
 			UserKeyOrder: true,
+		},
+		chunk.CMessages, chunk.CThreadMessages,
+	)
+}
+
+func (r messageRepository) PageForID(ctx context.Context, conn sqlx.QueryerContext, channelID string, limit, offset int) (iter.Seq2[DBMessage, error], error) {
+	return r.allOfTypeWhere(
+		ctx,
+		conn,
+		queryParams{
+			Where:        "T.CHANNEL_ID = ?" + channelTimelineCondition,
+			Binds:        []any{channelID},
+			UserKeyOrder: true,
+			Limit:        limit,
+			Offset:       offset,
 		},
 		chunk.CMessages, chunk.CThreadMessages,
 	)

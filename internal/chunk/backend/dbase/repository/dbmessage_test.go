@@ -1581,3 +1581,167 @@ func Test_messageRepository_CountThreadOnlyParts(t *testing.T) {
 		})
 	}
 }
+
+func Test_messageRepository_PageForID(t *testing.T) {
+	type fields struct {
+		genericRepository genericRepository[DBMessage]
+	}
+	type args struct {
+		ctx       context.Context
+		conn      sqlx.QueryerContext
+		channelID string
+		limit     int
+		offset    int
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		prepFn  utilityFn
+		want    []testutil.TestResult[DBMessage]
+		wantErr bool
+	}{
+		{
+			name:   "first page",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args: args{
+				ctx: t.Context(), conn: testConn(t), channelID: "C123",
+				limit: 2, offset: 0,
+			},
+			prepFn: messagePrepFn,
+			want: []testutil.TestResult[DBMessage]{
+				{V: *dbmA},
+				{V: *dbmB_},
+			},
+		},
+		{
+			name:   "second page returns the deduplicated tail",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args: args{
+				ctx: t.Context(), conn: testConn(t), channelID: "C123",
+				limit: 2, offset: 2,
+			},
+			prepFn: messagePrepFn,
+			want: []testutil.TestResult[DBMessage]{
+				{V: *dbmCt0},
+			},
+		},
+		{
+			name:   "offset past the end returns nothing",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args: args{
+				ctx: t.Context(), conn: testConn(t), channelID: "C123",
+				limit: 2, offset: 10,
+			},
+			prepFn: messagePrepFn,
+			want:   nil,
+		},
+		{
+			name:   "zero limit means no limit",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args: args{
+				ctx: t.Context(), conn: testConn(t), channelID: "C123",
+				limit: 0, offset: 0,
+			},
+			prepFn: messagePrepFn,
+			want: []testutil.TestResult[DBMessage]{
+				{V: *dbmA},
+				{V: *dbmB_},
+				{V: *dbmCt0},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.prepFn != nil {
+				tt.prepFn(t, tt.args.conn.(PrepareExtContext))
+			}
+			r := messageRepository{genericRepository: tt.fields.genericRepository}
+			got, err := r.PageForID(tt.args.ctx, tt.args.conn, tt.args.channelID, tt.args.limit, tt.args.offset)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("messageRepository.PageForID() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			testutil.AssertIterResult(t, tt.want, got)
+		})
+	}
+}
+
+func Test_messageRepository_CountBeforeID(t *testing.T) {
+	type fields struct {
+		genericRepository genericRepository[DBMessage]
+	}
+	type args struct {
+		ctx       context.Context
+		conn      sqlx.QueryerContext
+		channelID string
+		ts        string
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		prepFn  utilityFn
+		want    int64
+		wantErr bool
+	}{
+		{
+			name:   "first message",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args:   args{ctx: t.Context(), conn: testConn(t), channelID: "C123", ts: "123.456"},
+			prepFn: messagePrepFn,
+			want:   1,
+		},
+		{
+			name:   "middle message counts itself and older",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args:   args{ctx: t.Context(), conn: testConn(t), channelID: "C123", ts: "124.555"},
+			prepFn: messagePrepFn,
+			want:   2,
+		},
+		{
+			name:   "thread replies are not part of the channel timeline",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args:   args{ctx: t.Context(), conn: testConn(t), channelID: "C123", ts: "125.799"},
+			prepFn: messagePrepFn,
+			want:   3,
+		},
+		{
+			// NB: TS2int builds the ID by concatenating the digits before and
+			// after the dot without decimal alignment, so a timestamp needs a
+			// numerically small before-part (not just a small magnitude with
+			// more fractional digits) to sort before every fixture ID here.
+			name:   "timestamp older than everything",
+			fields: fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args:   args{ctx: t.Context(), conn: testConn(t), channelID: "C123", ts: "0.0"},
+			prepFn: messagePrepFn,
+			want:   0,
+		},
+		{
+			name:    "invalid timestamp",
+			fields:  fields{genericRepository: genericRepository[DBMessage]{DBMessage{}}},
+			args:    args{ctx: t.Context(), conn: testConn(t), channelID: "C123", ts: "not-a-ts"},
+			prepFn:  messagePrepFn,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.prepFn != nil {
+				tt.prepFn(t, tt.args.conn.(PrepareExtContext))
+			}
+			r := messageRepository{genericRepository: tt.fields.genericRepository}
+			got, err := r.CountBeforeID(tt.args.ctx, tt.args.conn, tt.args.channelID, tt.args.ts)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("messageRepository.CountBeforeID() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if err != nil {
+				return
+			}
+			if got != tt.want {
+				t.Errorf("messageRepository.CountBeforeID() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

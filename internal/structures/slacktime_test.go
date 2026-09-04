@@ -129,3 +129,24 @@ func Test_parseThreadID(t *testing.T) {
 		})
 	}
 }
+
+func Test_TStoThreadID(t *testing.T) {
+	tests := []struct {
+		name string
+		ts   string
+		want string
+	}{
+		{"ordinary timestamp", "1738580940.349469", "p1738580940349469"},
+		{"round trip of ThreadIDtoTS", ThreadIDtoTS("p1710063528879959"), "p1710063528879959"},
+		{"empty", "", ""},
+		{"no separator", "1738580940", ""},
+		{"not a number", "abc.def", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TStoThreadID(tt.ts); got != tt.want {
+				t.Errorf("TStoThreadID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

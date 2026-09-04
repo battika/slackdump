@@ -282,6 +282,38 @@ func (s *Source) AllMessages(ctx context.Context, channelID string) (iter.Seq2[s
 	return valueIter(it), nil
 }
 
+// CountMessages returns the number of messages in the channel timeline.
+func (s *Source) CountMessages(ctx context.Context, channelID string) (int64, error) {
+	mr := repository.NewMessageRepository()
+	return mr.Count(ctx, s.conn, channelID)
+}
+
+// MessagesPage returns a window of the channel timeline, oldest first.  A
+// limit of 0 means no limit.
+func (s *Source) MessagesPage(ctx context.Context, channelID string, limit, offset int) (iter.Seq2[slack.Message, error], error) {
+	mr := repository.NewMessageRepository()
+	it, err := mr.PageForID(ctx, s.conn, channelID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return valueIter(it), nil
+}
+
+// MessageOrdinal returns the 0-based position of ts within the channel
+// timeline.  When ts is not itself a timeline message, it returns the position
+// the message would occupy, which is what page resolution needs.
+func (s *Source) MessageOrdinal(ctx context.Context, channelID, ts string) (int64, error) {
+	mr := repository.NewMessageRepository()
+	n, err := mr.CountBeforeID(ctx, s.conn, channelID, ts)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, nil
+	}
+	return n - 1, nil
+}
+
 func (s *Source) AllThreadMessages(ctx context.Context, channelID, threadID string) (iter.Seq2[slack.Message, error], error) {
 	mr := repository.NewMessageRepository()
 	it, err := mr.AllForThread(ctx, s.conn, channelID, threadID)
