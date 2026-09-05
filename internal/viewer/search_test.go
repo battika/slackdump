@@ -728,9 +728,15 @@ func TestSearchHandler_Mode(t *testing.T) {
 	})
 
 	t.Run("an unbuildable index is a view state, not a 500", func(t *testing.T) {
-		// Word search on a read-only archive is explainable, so the panel says
-		// so.  It must not quietly re-run in contains mode either: the user
-		// picked a mode and would be shown answers to a different question.
+		// A word search whose index cannot be built is explainable, so the
+		// panel explains it.  It must not quietly re-run in contains mode
+		// either: the user picked a mode and would be shown answers to a
+		// different question.
+		//
+		// The copy deliberately does not name a single cause.  Through the
+		// viewer a genuinely read-only archive never gets this far — it fails
+		// in migrate at open — so the reachable case is a transient write
+		// failure such as another process holding the write lock.
 		v, stub := newSearchViewer(t, 3)
 		stub.err = dbase.ErrIndexUnavailable
 		req := httptest.NewRequest(http.MethodGet, "/search?q=hello", nil)
@@ -745,7 +751,7 @@ func TestSearchHandler_Mode(t *testing.T) {
 			t.Errorf("SearchMessages called %d times, want 1 — no silent retry in another mode", stub.calls)
 		}
 		body := rr.Body.String()
-		if !strings.Contains(body, "read-only") {
+		if !strings.Contains(body, "could not be built") {
 			t.Errorf("the panel should explain why word search has no index: %q", body)
 		}
 		if strings.Contains(body, "No matches") {
@@ -770,7 +776,7 @@ func TestSearchHandler_Mode(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rr.Code)
 		}
-		if !strings.Contains(rr.Body.String(), "read-only") {
+		if !strings.Contains(rr.Body.String(), "could not be built") {
 			t.Errorf("a wrapped ErrIndexUnavailable should still render the explanation: %q", rr.Body.String())
 		}
 	})

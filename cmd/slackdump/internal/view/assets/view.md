@@ -80,8 +80,11 @@ straight away, and in `Words` after a restart.
 The index is an addition to the archive, not a change to its schema, so an
 archive this viewer has indexed still opens in any other build of slackdump.
 
-If the archive file cannot be written to, the index cannot be built and the
-panel says so; `Contains` still works.
+If the index cannot be built, the panel says so and `Contains` still works.
+Note that an archive the viewer cannot write to at all will not open in the
+first place, because opening one applies any pending schema migrations, so in
+practice this state means a transient write failure such as another program
+holding the archive open.
 
 Search requires a database archive, because it needs an indexed store to query.
 Chunk, export and dump archives show no search box at all rather than a slow

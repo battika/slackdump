@@ -188,7 +188,7 @@
     {{ if .TooShort }}
     <p class="search-note">Type at least 2 characters.</p>
     {{ else if .IndexUnavailable }}
-    <p class="search-note">Word search needs a full-text index, and this archive cannot store one &mdash; the file is read-only. Contains still works: it scans the messages directly.</p>
+    <p class="search-note">Word search needs a full-text index, and this one could not be built &mdash; the archive may be locked by another program, or stored somewhere it cannot be written to. Contains still works: it scans the messages directly.</p>
     {{ if .ContainsURL }}
     <a class="search-suggest" href="{{ .ContainsURL }}"
        hx-get="{{ .ContainsURL }}" hx-target="#thread" hx-swap="innerHTML">Search for &ldquo;{{ .Query }}&rdquo; with Contains</a>
