@@ -12,6 +12,30 @@
   from `slackdump convert -f html`, which needs no JavaScript to expand or
   collapse.
 
+- **Paged channel timelines**: `slackdump view` serves long conversations a
+  page at a time instead of rendering them whole. A 9,550-message channel
+  previously produced roughly 9 MB of HTML in a single response. Pages hold 100
+  messages by default; use `-page-size N` to change that, or `-page-size 0` to
+  render whole conversations as before. Opening a conversation lands on the
+  most recent page, and links to individual messages still resolve to whichever
+  page holds the message.
+
+- **Search the archive from the viewer**: archives in the database format can
+  be searched from `slackdump view`, either across every conversation or within
+  the one you are viewing. Results appear as you type; clicking one opens that
+  conversation at the message and highlights it without closing the results
+  list, and `Prev`/`Next` or the `n`/`N` keys step between matches. Other
+  archive formats show no search box, rather than offering a slow scan.
+
+- **Two search modes**: `Words (FTS)` matches whole words through an SQLite
+  FTS5 index — faster, accent-insensitive, and supporting `term*` prefix
+  searches — while `Contains` keeps substring matching, which finds fragments
+  inside words that word matching cannot. Word results can be ordered by
+  relevance instead of recency. The full-text index is built inside the archive
+  on the first word search and rebuilt when the archive changes; it adds tables
+  without altering the schema, so an indexed archive still opens in earlier
+  versions of slackdump.
+
 ## v4.4.0
 
 ### New Features
