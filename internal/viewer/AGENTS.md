@@ -245,7 +245,11 @@ degrade. Two `viewer.js` behaviours support it, both enhancements per invariant 
   that is still `display:none`. This was a real bug: results present in the DOM, invisible.
 - `scrollHitIntoView` scrolls `.search-hit` into view on `htmx:afterSettle`, because an OOB swap
   is not a navigation and the `#anchor` never fires. Before the fix the highlighted message could
-  sit thousands of pixels below the fold, off screen.
+  sit thousands of pixels below the fold, off screen. It only scrolls when the settled swap
+  delivered content into `#conversation` (checked via `event.target`, which htmx sets to each
+  swapped-in element including OOB ones, then `event.detail.target`): the `.search-hit` header
+  stays in the DOM while a hit is active, so scrolling on every settle would yank the reader back
+  to the hit whenever a thread, profile or alias edit swapped elsewhere on the page.
 
 `onSearchKeydown` only calls `.click()` on the server-rendered Prev/Next links. It never builds a
 URL or holds state — that is what keeps the keyboard path identical to the mouse path.

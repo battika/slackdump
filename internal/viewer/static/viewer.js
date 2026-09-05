@@ -166,10 +166,34 @@
         }
     }
 
+    // True when the swap that just settled delivered content into #conversation.
+    // htmx fires htmx:afterSettle once per swapped-in element (the main target's
+    // new children, and each OOB-swapped element such as the #conversation
+    // section emitted by the search results), with detail.target always naming
+    // the *requesting* element's target.  So an OOB #conversation swap is only
+    // visible through event.target, and a plain hx-target="#conversation" swap
+    // through either; check both.
+    function swapTouchesConversation(event) {
+        var settled = event.target;
+        var requested = event.detail && event.detail.target;
+        return isInConversation(settled) || isInConversation(requested);
+    }
+
+    function isInConversation(el) {
+        return !!(el && el.nodeType === 1 && el.closest("#conversation"));
+    }
+
     // An out-of-band swap is not a navigation, so the #anchor never fires and
     // the activated message can land thousands of pixels outside the viewport.
-    // Bring it into view after the swap.
-    function scrollHitIntoView() {
+    // Bring it into view after the swap — but only after the swap that actually
+    // rendered it.  The .search-hit header stays in the DOM for as long as the
+    // hit is active, so scrolling on every settle (opening a thread or profile
+    // in #thread, renaming the channel in #channel-heading) would yank the
+    // reader back to the hit and undo their scroll position.
+    function scrollHitIntoView(event) {
+        if (event && !swapTouchesConversation(event)) {
+            return;
+        }
         var hit = qs("#conversation .message-header.search-hit");
         if (hit) {
             hit.scrollIntoView({block: "center"});
@@ -207,9 +231,9 @@
         }
     });
 
-    document.body.addEventListener("htmx:afterSettle", function () {
+    document.body.addEventListener("htmx:afterSettle", function (event) {
         syncActiveChannel();
-        scrollHitIntoView();
+        scrollHitIntoView(event);
     });
 
     // Anything swapped into the side panel should make it visible.  The panel
