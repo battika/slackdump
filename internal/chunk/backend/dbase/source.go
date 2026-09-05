@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/trace"
+	"sync"
 	"time"
 
 	"github.com/rusq/slackdump/v4/internal/chunk/backend/dbase/repository"
@@ -49,7 +50,41 @@ type Source struct {
 	// canClose set to false when the connection is passed to the source
 	// and should not be closed by the source.
 	canClose bool
+
+	// ftsMu guards ftsBuilt, which records that this Source's full-text index
+	// has been brought up to date: one build per Source, not one per process
+	// (a long-lived process opening several archives must index each one) and
+	// not one per query (repeated searches must not repeatedly pay for it).
+	//
+	// Only success is remembered.  A failed build must be retried, because the
+	// common failures are transient — the request context being cancelled (the
+	// viewer aborts an in-flight search on the next keystroke) or the database
+	// being busy while another process writes.  Caching those would disable
+	// word search for the life of the Source and report it as a read-only
+	// archive, which it is not.
+	ftsMu    sync.Mutex
+	ftsBuilt bool
 }
+
+// SearchModeWords and SearchModeContains select the matching strategy for
+// [Source.SearchMessages]: SearchModeWords does FTS5 whole-token matching,
+// SearchModeContains does a LIKE substring scan.
+//
+// mode is a plain string, deliberately: the viewer declares an unexported
+// interface that *Source must satisfy, and dbase cannot import the viewer
+// package, so a viewer-defined enum type could never appear in this
+// signature. Each side keeps its own constants and converts at the boundary.
+const (
+	SearchModeWords    = "words"    // FTS5 whole-token matching
+	SearchModeContains = "contains" // LIKE substring matching
+)
+
+// ErrIndexUnavailable is returned when word-mode search is requested but the
+// full-text index cannot be created, typically because the archive file is
+// read-only.  Callers should surface this rather than quietly running a
+// different kind of search: the user chose a mode and is entitled to know it
+// was not honoured.
+var ErrIndexUnavailable = errors.New("full-text index unavailable")
 
 // ErrIsDirectory is returned when a directory path is passed instead of
 // a database file.
@@ -314,15 +349,51 @@ func (s *Source) MessageOrdinal(ctx context.Context, channelID, ts string) (int6
 	return n - 1, nil
 }
 
-// SearchMessages returns up to limit messages whose text contains query,
-// newest first, across both channel timelines and thread replies.  An empty
-// channelID searches every conversation.  truncated reports whether more
-// matches existed than the limit allowed.
+// ensureFTS brings this Source's full-text index up to date, at most once per
+// Source for as long as it keeps succeeding.
+//
+// The lock is held across the build on purpose.  It stops two concurrent
+// first-searches from both paying for it, and — unlike sync.Once — the waiter
+// then re-checks and, if the first attempt failed, proceeds under *its own*
+// context instead of inheriting the first caller's cancellation.
+//
+// The cost of caching only success is that a genuinely unbuildable index (a
+// read-only archive) is re-attempted on every word search.  That attempt fails
+// on its first write, so it is cheap, and correctness is worth more than the
+// saved syscall.
+func (s *Source) ensureFTS(ctx context.Context) error {
+	s.ftsMu.Lock()
+	defer s.ftsMu.Unlock()
+	if s.ftsBuilt {
+		return nil
+	}
+	if err := repository.EnsureFTS(ctx, s.conn); err != nil {
+		return err
+	}
+	s.ftsBuilt = true
+	return nil
+}
+
+// SearchMessages returns up to limit messages matching query, across both
+// channel timelines and thread replies.  An empty channelID searches every
+// conversation.  truncated reports whether more matches existed than the
+// limit allowed.
+//
+// mode selects the matching strategy.  SearchModeWords does FTS5 whole-token
+// matching and lazily builds the full-text index on this Source's first
+// word-mode call, retrying on the next call if that build fails; see
+// [ErrIndexUnavailable] for the failure that does not go away.  Any other
+// value, including an unrecognised one, runs a SearchModeContains LIKE
+// substring scan — an unrecognised mode must not error, it degrades to the
+// mode that always works. Results are newest first, unless byRelevance is set
+// and mode is SearchModeWords, in which case they are ordered by bm25 score;
+// byRelevance is ignored in contains mode, since a LIKE scan has no score to
+// order by.
 //
 // Each returned message has Channel set, which is otherwise absent from stored
 // conversations.history payloads; that is what lets callers work with plain
 // slack.Message values instead of a dedicated hit type.
-func (s *Source) SearchMessages(ctx context.Context, query, channelID string, limit int) (msgs []slack.Message, truncated bool, err error) {
+func (s *Source) SearchMessages(ctx context.Context, query, channelID, mode string, byRelevance bool, limit int) (msgs []slack.Message, truncated bool, err error) {
 	if limit <= 0 {
 		// A non-positive cap asks for nothing, so return nothing.  Guarding
 		// here also keeps the msgs[:limit] trim below in range: the repository
@@ -333,7 +404,21 @@ func (s *Source) SearchMessages(ctx context.Context, query, channelID string, li
 	mr := repository.NewMessageRepository()
 	// One row beyond the cap tells us the result was truncated without a
 	// second COUNT query.
-	it, err := mr.SearchMessages(ctx, s.conn, query, channelID, limit+1)
+	var it iter.Seq2[repository.DBMessage, error]
+	if mode == SearchModeWords {
+		if err := s.ensureFTS(ctx); err != nil {
+			if ctx.Err() != nil {
+				// The caller went away mid-build.  Reporting that as an
+				// unavailable index would have the viewer explain a
+				// read-only archive that is nothing of the sort.
+				return nil, false, err
+			}
+			return nil, false, fmt.Errorf("%w: %w", ErrIndexUnavailable, err)
+		}
+		it, err = mr.SearchMessagesFTS(ctx, s.conn, query, channelID, byRelevance, limit+1)
+	} else {
+		it, err = mr.SearchMessages(ctx, s.conn, query, channelID, limit+1)
+	}
 	if err != nil {
 		return nil, false, err
 	}

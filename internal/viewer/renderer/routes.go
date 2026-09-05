@@ -160,11 +160,23 @@ func (r *Routes) File(id, filename string) string {
 	return routePath("slackdump", "file", id, filename)
 }
 
+// searchModeDefault is the matching mode SearchHit leaves out of the URL,
+// because it is what an absent ?m= already means to the viewer.  It is spelled
+// out here rather than imported from the database layer: this package builds
+// links and knows nothing about search backends, and any other mode is carried
+// through verbatim, so a mode added later needs no change here.
+const searchModeDefault = "words"
+
 // SearchHit returns the URL that activates hit i of a search.  It is the only
 // search URL the viewer emits: result rows and the prev/next controls all use
-// it, so a row click and a hit step are the same request.  A non-positive i
-// means "no hit activated".  Static output has no search, so it returns "".
-func (r *Routes) SearchHit(query, channelID string, i int) string {
+// it, so a row click and a hit step are the same request.  That is also why it
+// carries mode and ordering — a step link that dropped them would silently
+// re-run the query differently and land on a different message.  A non-positive
+// i means "no hit activated".  Static output has no search, so it returns "".
+//
+// Only non-default choices appear in the URL, so word mode with newest-first
+// ordering produces exactly the link this returned before modes existed.
+func (r *Routes) SearchHit(query, channelID string, i int, mode string, byRelevance bool) string {
 	if r == nil || r.mode == ModeStatic {
 		return ""
 	}
@@ -175,6 +187,12 @@ func (r *Routes) SearchHit(query, channelID string, i int) string {
 	}
 	if i > 0 {
 		vals.Set("i", strconv.Itoa(i))
+	}
+	if mode != "" && mode != searchModeDefault {
+		vals.Set("m", mode)
+	}
+	if byRelevance {
+		vals.Set("sort", "relevance")
 	}
 	return "/search?" + vals.Encode()
 }

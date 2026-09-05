@@ -83,8 +83,9 @@
     <input type="search" id="search-input" name="q" placeholder="Search messages"
            autocomplete="off" aria-label="Search messages"
            hx-get="/search" hx-target="#thread" hx-trigger="keyup changed delay:300ms, search"
-           hx-include="[name='ch']">
+           hx-include="[name='ch'], [name='m'], [name='sort']">
     {{ template "search_scope" . }}
+    {{ template "search_controls" .Search }}
 </form>
 {{ end }}
 
@@ -98,10 +99,10 @@
          whichever radio is checked when the input fires, so without this a
          scope change would do nothing until you retyped. */}}
     <label class="search-scope"><input type="radio" name="ch" value="" checked
-           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input"> All conversations</label>
+           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='m'], [name='sort']"> All conversations</label>
     {{ if .Conversation.ID }}
     <label class="search-scope"><input type="radio" name="ch" value="{{ .Conversation.ID }}"
-           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input"> {{ channelname .Conversation }}</label>
+           hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='m'], [name='sort']"> {{ channelname .Conversation }}</label>
     {{ end }}
 {{ end }}
 
@@ -113,12 +114,69 @@
 <div id="search-scope" class="search-scope-group" hx-swap-oob="outerHTML">{{ template "search_scope_inner" . }}</div>
 {{ end }}
 
+{{/* The matching mode and the ordering.  Unlike the scope blocks this one is
+     passed a *searchView rather than the page: the sidebar reaches it as
+     .Search, which is nil until a search has run, while the out-of-band
+     refresh is executed against the search that just ran.  Hence the guard —
+     no search yet means the defaults, words and newest first. */}}
+{{ define "search_controls_inner" }}
+    {{ $mode := "words" }}{{ $rel := false }}
+    {{ if . }}{{ $mode = .Mode }}{{ $rel = .ByRelevance }}{{ end }}
+    {{ $contains := eq $mode "contains" }}
+    {{/* A substring scan has no bm25 score, so the source ignores byRelevance
+         and orders by recency.  The controls report the search that ran, not
+         the one that was asked for, so Newest is the checked one here.  Only
+         the rendering is overridden: searchView.ByRelevance stays as requested,
+         because that is what SearchHit puts in the URL and what a bookmarked
+         contains link gives back the moment the mode flips to Words. */}}
+    {{ if $contains }}{{ $rel = false }}{{ end }}
+    {{/* Each radio carries its own trigger for the same reason the scope
+         radios do, and every one of them includes the other controls: an
+         hx-include reads whichever radio is checked when the request fires, so
+         a group left out would silently reset to its default. */}}
+    <div class="search-control-group" role="group" aria-label="Match mode">
+        <span class="search-control-label">Match:</span>
+        <label class="search-control"><input type="radio" name="m" value="words"{{ if not $contains }} checked{{ end }}
+               hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='ch'], [name='sort']"> Words (FTS)</label>
+        <label class="search-control"><input type="radio" name="m" value="contains"{{ if $contains }} checked{{ end }}
+               hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='ch'], [name='sort']"> Contains</label>
+    </div>
+    {{/* Relevance is a bm25 score, which only word matching produces.  In
+         contains mode it is disabled, not hidden: a control that vanishes
+         teaches nothing, a greyed one teaches where relevance comes from. */}}
+    <div class="search-control-group" role="group" aria-label="Sort order">
+        <span class="search-control-label">Sort:</span>
+        <label class="search-control"><input type="radio" name="sort" value="newest"{{ if not $rel }} checked{{ end }}
+               hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='ch'], [name='m']"> Newest</label>
+        <label class="search-control{{ if $contains }} disabled{{ end }}"><input type="radio" name="sort" value="relevance"{{ if $rel }} checked{{ end }}{{ if $contains }} disabled{{ end }}
+               hx-get="/search" hx-target="#thread" hx-trigger="change" hx-include="#search-input, [name='ch'], [name='m']"> Relevance</label>
+    </div>
+{{ end }}
+
+{{ define "search_controls" }}
+<div id="search-controls" class="search-controls-group">{{ template "search_controls_inner" . }}</div>
+{{ end }}
+
+{{ define "search_controls_oob" }}
+<div id="search-controls" class="search-controls-group" hx-swap-oob="outerHTML">{{ template "search_controls_inner" . }}</div>
+{{ end }}
+
 {{/* Used by channelPartial: the conversation swap plus an out-of-band refresh
      of the scope radios, so the per-conversation option tracks what you are
      actually looking at. */}}
 {{ define "hx_conversation_swap" }}
 {{ template "hx_conversation" . }}
 {{ if .CanSearch }}{{ template "search_scope_oob" . }}{{ end }}
+{{ end }}
+
+{{/* The htmx response: the panel plus an out-of-band refresh of the controls,
+     so a mode reached by clicking an escape link is reflected by the radios
+     the next keystroke reads.  It is deliberately not part of hx_search, which
+     index.html also renders for a bookmarked /search URL — hx-swap-oob means
+     nothing outside an AJAX response and would land there as stray markup. */}}
+{{ define "hx_search_response" }}
+{{ template "hx_search" . }}
+{{ template "search_controls_oob" . }}
 {{ end }}
 
 {{ define "hx_search" }}
@@ -129,8 +187,25 @@
 <div class="search-results">
     {{ if .TooShort }}
     <p class="search-note">Type at least 2 characters.</p>
+    {{ else if .IndexUnavailable }}
+    <p class="search-note">Word search needs a full-text index, and this archive cannot store one &mdash; the file is read-only. Contains still works: it scans the messages directly.</p>
+    {{ if .ContainsURL }}
+    <a class="search-suggest" href="{{ .ContainsURL }}"
+       hx-get="{{ .ContainsURL }}" hx-target="#thread" hx-swap="innerHTML">Search for &ldquo;{{ .Query }}&rdquo; with Contains</a>
+    {{ end }}
     {{ else if not .Hits }}
     <p class="search-note">No matches for &ldquo;{{ .Query }}&rdquo;.</p>
+    {{ if or .PrefixURL .ContainsURL }}
+    <p class="search-note">Words mode matches whole words only.</p>
+    {{ if .PrefixURL }}
+    <a class="search-suggest" href="{{ .PrefixURL }}"
+       hx-get="{{ .PrefixURL }}" hx-target="#thread" hx-swap="innerHTML">Try &ldquo;{{ .Query }}*&rdquo; as a prefix</a>
+    {{ end }}
+    {{ if .ContainsURL }}
+    <a class="search-suggest" href="{{ .ContainsURL }}"
+       hx-get="{{ .ContainsURL }}" hx-target="#thread" hx-swap="innerHTML">Search for &ldquo;{{ .Query }}&rdquo; with Contains</a>
+    {{ end }}
+    {{ end }}
     {{ else }}
     <p class="search-note">
         {{ if .Truncated }}showing {{ len .Hits }} most recent matches &mdash; narrow your search{{ else }}{{ len .Hits }} matches{{ end }}

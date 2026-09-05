@@ -358,6 +358,86 @@ testing:
 Note that a literal `%` is common in real data — percentages appear routinely
 in ordinary conversation — so this is not a theoretical concern.
 
+### 22. The full-text index is deliberately not a goose migration
+
+`MESSAGE_FTS` and `MESSAGE_FTS_STATE` are created by `repository.EnsureFTS`,
+outside the migration chain. This is the most important note in the FTS work
+and it is not a style preference.
+
+goose disables out-of-order migrations by default and **errors** when it finds
+one. Ship the index as a migration here and any archive written by a newer
+upstream slackdump — which numbers its migrations without knowing about this
+fork's — becomes unopenable by this build. Not "unsearchable": unopenable, at
+`Open`.
+
+The index is a derived artifact. It can always be rebuilt from `MESSAGE`, so it
+needs no schema versioning, and creating it must never touch
+`goose_db_version`. `TestEnsureFTS/does not touch the goose version` is the
+guard. If that test ever fails, the change is unshippable regardless of
+anything else, because it breaks archives written by other people's slackdump.
+
+The same reasoning rules out triggers: an `AFTER INSERT` trigger on `MESSAGE`
+would be schema an upstream writer never agreed to, and would make every
+archiving run pay for an index most users never query.
+
+### 23. The staleness signal, and what it does not catch
+
+`MESSAGE_FTS` is an FTS5 **external-content** table: it stores `MESSAGE`
+rowids, not text. If a rowid comes to mean a different message, the index
+silently serves wrong results — so `EnsureFTS` records
+`(COUNT(*), SUM(ID % 1000000007), SUM(ROWID % 1000000007))` at build time and
+rebuilds whenever the live triple differs.
+
+Why each term:
+
+- `COUNT(*)` catches ordinary churn. Sound here because the schema has no
+  upsert (quirk 1): every edit or re-fetch arrives as a new row, and dedupe
+  only removes rows.
+- `SUM(ID % p)` catches a delete plus an insert of a *different* message, which
+  leaves the count unchanged.
+- `SUM(ROWID % p)` catches a delete plus a re-insert of the **same** ID, which
+  leaves both other terms identical while SQLite hands the freed rowid to a
+  different row. This term was removed once, on the mistaken reasoning that it
+  only guarded against `VACUUM` renumbering. It was restored after the failure
+  above was reproduced: the message became permanently invisible to word
+  search.
+
+The moduli are load-bearing. `MESSAGE.ID` values are ~1e16 and an unbounded
+`SUM(ID)` overflows int64 on any archive past a few thousand messages — that
+shipped once and broke `EnsureFTS` outright.
+
+**Known blind spot, accepted.** Deleting the row holding `MAX(ROWID)` and
+inserting a replacement with the same ID but different text leaves all three
+terms unchanged, because SQLite reuses the freed rowid. So do an in-place
+`UPDATE` of `TXT`, and a cross-channel ID collision. Closing these means
+checksumming `TXT`, i.e. a full text scan on every search, which is not worth
+it for writes slackdump itself never performs. Any failure to read the stored
+state — table missing, wrong shape, no row — counts as stale, so an older
+state table is replaced rather than trusted.
+
+### 24. Only a *successful* index build is remembered
+
+`Source.ensureFTS` guards `ftsBuilt` with a mutex and sets it only on success.
+Caching the failure looks like the obvious optimisation and is a bug: the
+viewer's search box fires on `keyup` and htmx aborts the in-flight request on
+the next keystroke, so the most likely first-ever outcome is
+`context.Canceled`. Latching that disabled word search for the life of the
+`Source` and reported it to the user as a read-only archive, which it was not.
+`SQLITE_BUSY` from a concurrent `resume` had the same effect.
+
+The lock is held across the build so two concurrent first-searches do not both
+pay for it, and unlike `sync.Once` the waiter proceeds under **its own**
+context rather than inheriting the first caller's cancellation.
+
+A cancelled build returns the context error unwrapped; only a genuine failure
+is wrapped in `ErrIndexUnavailable`. On a truly read-only archive every word
+search re-attempts the build, which fails immediately on the first write — a
+cheap price for not lying about why search is unavailable.
+
+`EnsureFTS` has exactly one non-test caller and is unreachable from `Open`,
+`OpenRW`, `migrate` and every constructor. Commands that never search must
+never pay for the index.
+
 ---
 
 ## Relevant Source Files

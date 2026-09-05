@@ -42,12 +42,46 @@ matches one at a time. `Prev`/`Next` at the foot of the panel step between
 hits, as do the `n` and `N` keys. A result inside a thread opens the thread
 itself, with a link back to the conversation.
 
-Matching is case-insensitive, including accented characters, so a word typed
-in any case is found. Accents themselves are not stripped: a term written
-without them will not match the accented spelling. The search term is
-matched literally, so characters such as `%` and `_` have no special meaning.
-At most 500 matches are shown, newest first; the panel says so when there were
-more.
+### Words and Contains
+
+Two ways of matching are offered, because neither wins outright:
+
+`Words (FTS)`, the default, matches whole words using a full-text index. It is
+the faster of the two and it ignores accents, so `resume` finds `résumé`. It
+does not match inside words: `log` will not find `login`. A trailing `*` turns
+a term into a prefix search, which is how you reach the words a stem should
+have found — `nation*` matches `national` and `nationwide`.
+
+`Contains` matches any substring, so `log` does find `login`. It is the slower
+of the two and it returns far more noise on short terms, but it needs no index
+and it finds fragments that word matching cannot. Accents are significant
+here: a term written without them will not match the accented spelling.
+
+Both modes are case-insensitive, accented characters included, and both treat
+the term literally, so `%` and `_` have no special meaning.
+
+Results are newest first. In `Words` mode you can sort by relevance instead;
+`Contains` has no relevance to sort by, so the control is greyed out there. At
+most 500 matches are shown and the panel says so when there were more.
+
+### The index
+
+`Words` mode needs a full-text index. The viewer builds it inside the archive
+the first time you run a word search, which takes a moment on a large archive
+and nothing thereafter. Nothing else pays for it: commands that never search
+never build it.
+
+Each run of the viewer checks whether the archive has changed since the index
+was built and rebuilds it if so. The check happens once, at the first word
+search of that run, so a viewer left open while an archive is being written to
+keeps serving the index it started with: new messages appear in `Contains`
+straight away, and in `Words` after a restart.
+
+The index is an addition to the archive, not a change to its schema, so an
+archive this viewer has indexed still opens in any other build of slackdump.
+
+If the archive file cannot be written to, the index cannot be built and the
+panel says so; `Contains` still works.
 
 Search requires a database archive, because it needs an indexed store to query.
 Chunk, export and dump archives show no search box at all rather than a slow

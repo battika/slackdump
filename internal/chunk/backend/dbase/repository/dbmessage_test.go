@@ -17,9 +17,12 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"iter"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
@@ -1848,4 +1851,241 @@ func Test_messageRepository_SearchMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+// explodingQueryer fails the test if it is ever queried.  It is used to prove
+// that an empty ftsQuery result short-circuits before reaching the database.
+type explodingQueryer struct {
+	t *testing.T
+}
+
+func (q explodingQueryer) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	q.t.Helper()
+	q.t.Fatal("QueryContext must not be called for an empty FTS query")
+	return nil, nil
+}
+
+func (q explodingQueryer) QueryxContext(context.Context, string, ...any) (*sqlx.Rows, error) {
+	q.t.Helper()
+	q.t.Fatal("QueryxContext must not be called for an empty FTS query")
+	return nil, nil
+}
+
+func (q explodingQueryer) QueryRowxContext(context.Context, string, ...any) *sqlx.Row {
+	q.t.Helper()
+	q.t.Fatal("QueryRowxContext must not be called for an empty FTS query")
+	return nil
+}
+
+// ftsMessagePrepFn wraps messagePrepFn and additionally ensures the FTS index
+// exists, as SearchMessagesFTS requires callers to have done.
+func ftsMessagePrepFn(t *testing.T, conn PrepareExtContext) {
+	t.Helper()
+	messagePrepFn(t, conn)
+	if err := EnsureFTS(t.Context(), conn); err != nil {
+		t.Fatalf("EnsureFTS: %v", err)
+	}
+}
+
+// relevanceMsgs is a pair whose bm25 order and recency order genuinely
+// disagree: the older message is two tokens long and both of them are the
+// search term, the newer one mentions the term once in some two hundred words
+// of filler.  bm25 prefers the short dense document, recency prefers the long
+// sparse one.  Nothing in the shared fixture discriminates like that — every
+// message there is a short document of similar length — so without this pair a
+// SearchMessagesFTS that ignored byRelevance entirely would still pass.
+var relevanceMsgs = []slack.Message{
+	{Msg: slack.Msg{Timestamp: "130.001", Text: "needle needle"}},
+	{Msg: slack.Msg{Timestamp: "130.002", Text: "needle " + strings.Repeat("filler ", 200)}},
+}
+
+// relevancePrepFn loads relevanceMsgs and builds the index over them.  Like
+// literalPercentPrepFn it is deliberately separate from messagePrepFn: these
+// messages would shift the expected results of every test that uses the shared
+// fixture.
+func relevancePrepFn(t *testing.T, conn PrepareExtContext) {
+	t.Helper()
+	prepChunk(chunk.CMessages)(t, conn)
+	mr := NewMessageRepository()
+	for i := range relevanceMsgs {
+		if err := mr.Insert(t.Context(), conn, must(NewDBMessage(1, i, "C123", &relevanceMsgs[i]))); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if err := EnsureFTS(t.Context(), conn); err != nil {
+		t.Fatalf("EnsureFTS: %v", err)
+	}
+}
+
+func Test_messageRepository_SearchMessagesFTS(t *testing.T) {
+	r := messageRepository{genericRepository: genericRepository[DBMessage]{DBMessage{}}}
+
+	searchTexts := func(t *testing.T, conn sqlx.QueryerContext, query, channelID string, byRelevance bool, limit int) []string {
+		t.Helper()
+		it, err := r.SearchMessagesFTS(t.Context(), conn, query, channelID, byRelevance, limit)
+		if err != nil {
+			t.Fatalf("SearchMessagesFTS() error = %v", err)
+		}
+		var got []string
+		for dbm, err := range it {
+			if err != nil {
+				t.Fatalf("iteration error = %v", err)
+			}
+			got = append(got, dbm.Text)
+		}
+		return got
+	}
+
+	type args struct {
+		query       string
+		channelID   string
+		byRelevance bool
+		limit       int
+	}
+	tests := []struct {
+		name      string
+		args      args
+		wantTexts []string
+	}{
+		{
+			name:      "reaches thread replies, newest first",
+			args:      args{query: "thread", limit: 10},
+			wantTexts: []string{"C thread 2", "C thread 1"},
+		},
+		{
+			name:      "multi-token implicit AND matches only the message with all tokens",
+			args:      args{query: "C thread 1", limit: 10},
+			wantTexts: []string{"C thread 1"},
+		},
+		{
+			name:      "channel scoping to C123 finds the thread replies",
+			args:      args{query: "thread", channelID: "C123", limit: 10},
+			wantTexts: []string{"C thread 2", "C thread 1"},
+		},
+		{
+			name:      "channel scoping to D124 finds nothing",
+			args:      args{query: "thread", channelID: "D124", limit: 10},
+			wantTexts: nil,
+		},
+		{
+			name:      "limit caps the result set",
+			args:      args{query: "thread", limit: 1},
+			wantTexts: []string{"C thread 2"},
+		},
+		{
+			name:      "login with a colon returns without a syntax error",
+			args:      args{query: "login:", limit: 10},
+			wantTexts: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := testConn(t)
+			ftsMessagePrepFn(t, conn)
+			got := searchTexts(t, conn, tt.args.query, tt.args.channelID, tt.args.byRelevance, tt.args.limit)
+			if !reflect.DeepEqual(got, tt.wantTexts) {
+				t.Errorf("SearchMessagesFTS() = %v, want %v", got, tt.wantTexts)
+			}
+		})
+	}
+
+	t.Run("word boundary: a substring of a fixture word is not a whole-token match", func(t *testing.T) {
+		conn := testConn(t)
+		ftsMessagePrepFn(t, conn)
+
+		// "read" is a substring of "thread" but is never a whole token on its
+		// own — this is the difference that justifies FTS mode existing
+		// alongside LIKE-based SearchMessages.
+		const term = "read"
+
+		got := searchTexts(t, conn, term, "", false, 10)
+		if len(got) != 0 {
+			t.Errorf("SearchMessagesFTS(%q) = %v, want none: FTS must not match substrings", term, got)
+		}
+
+		like, err := r.SearchMessages(t.Context(), conn, term, "", 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		var likeGot []string
+		for dbm, err := range like {
+			if err != nil {
+				t.Fatalf("iteration error = %v", err)
+			}
+			likeGot = append(likeGot, dbm.Text)
+		}
+		if len(likeGot) == 0 {
+			t.Fatalf("SearchMessages(%q) found nothing; the LIKE-mode counterpart must still find the substring for the contrast to mean anything", term)
+		}
+	})
+
+	t.Run("deduplicates B/B' across chunks, newer chunk wins", func(t *testing.T) {
+		conn := testConn(t)
+		ftsMessagePrepFn(t, conn)
+
+		// B (chunk 1) and B' (chunk 2) share message ID 124555.  Both are
+		// distinct rows in MESSAGE_FTS (distinct ROWIDs), so a naive join
+		// would return this message twice.
+		got := searchTexts(t, conn, "B'", "", false, 10)
+		if len(got) != 1 {
+			t.Fatalf("newest order: got %d results, want 1: %v", len(got), got)
+		}
+		if got[0] != "B'" {
+			t.Errorf("newest order: got %q, want %q (the newer chunk)", got[0], "B'")
+		}
+
+		// The relevance path builds its own join and must dedupe identically.
+		gotRel := searchTexts(t, conn, "B'", "", true, 10)
+		if len(gotRel) != 1 {
+			t.Fatalf("byRelevance: got %d results, want 1: %v", len(gotRel), gotRel)
+		}
+		if gotRel[0] != "B'" {
+			t.Errorf("byRelevance: got %q, want %q (the newer chunk)", gotRel[0], "B'")
+		}
+	})
+
+	t.Run("relevance ordering returns the same set as newest ordering", func(t *testing.T) {
+		conn := testConn(t)
+		ftsMessagePrepFn(t, conn)
+
+		newest := searchTexts(t, conn, "thread", "", false, 10)
+		byRel := searchTexts(t, conn, "thread", "", true, 10)
+
+		sort.Strings(newest)
+		sort.Strings(byRel)
+		if !reflect.DeepEqual(newest, byRel) {
+			t.Errorf("byRelevance set = %v, want the same set as newest %v", byRel, newest)
+		}
+	})
+
+	t.Run("relevance and recency disagree on which hit comes first", func(t *testing.T) {
+		conn := testConn(t)
+		relevancePrepFn(t, conn)
+
+		short, long := relevanceMsgs[0].Text, relevanceMsgs[1].Text
+		newest := searchTexts(t, conn, "needle", "", false, 10)
+		byRel := searchTexts(t, conn, "needle", "", true, 10)
+		if len(newest) != 2 || len(byRel) != 2 {
+			t.Fatalf("both orderings should return both messages, got %d and %d", len(newest), len(byRel))
+		}
+		if newest[0] != long {
+			t.Errorf("newest-first hit = %.30q..., want the newer, longer message", newest[0])
+		}
+		if byRel[0] != short {
+			t.Errorf("byRelevance hit = %.30q..., want the older, denser message", byRel[0])
+		}
+		if newest[0] == byRel[0] {
+			t.Error("the two orderings agreed on the first hit; the fixture cannot tell a live byRelevance from an ignored one")
+		}
+	})
+
+	t.Run("empty query returns an empty iterator without touching the database", func(t *testing.T) {
+		it, err := r.SearchMessagesFTS(t.Context(), explodingQueryer{t: t}, "   ", "", false, 10)
+		if err != nil {
+			t.Fatalf("SearchMessagesFTS() error = %v", err)
+		}
+		for dbm, err := range it {
+			t.Fatalf("expected no results, got dbm=%v err=%v", dbm, err)
+		}
+	})
 }

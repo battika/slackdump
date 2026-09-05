@@ -110,6 +110,42 @@
         gap: .375rem;
     }
 
+    .search-controls-group {
+        display: flex;
+        gap: 1rem;
+        margin-top: .25rem;
+    }
+
+    .search-control-group {
+        display: flex;
+        flex-direction: column;
+        gap: .125rem;
+    }
+
+    .search-control-label {
+        color: var(--sidebar-text-color);
+        opacity: .6;
+        font-size: .6875rem;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+    }
+
+    .search-control {
+        color: var(--sidebar-text-color);
+        opacity: .8;
+        font-size: .75rem;
+        display: flex;
+        align-items: center;
+        gap: .375rem;
+    }
+
+    /* Relevance is a word-search score, so it greys out in contains mode
+       rather than disappearing — see the tab treatment above. */
+    .search-control.disabled {
+        opacity: .35;
+        cursor: not-allowed;
+    }
+
     .search-results {
         flex: 1;
         overflow-y: auto;
@@ -120,6 +156,19 @@
         padding: .25rem 1rem .5rem;
         color: var(--text-secondary);
         font-size: .8125rem;
+    }
+
+    .search-suggest {
+        display: block;
+        padding: .125rem 1rem .375rem;
+        color: var(--link-color);
+        font-size: .8125rem;
+        text-decoration: none;
+    }
+
+    .search-suggest:hover,
+    .search-suggest:focus-visible {
+        text-decoration: underline;
     }
 
     .search-hit-row {

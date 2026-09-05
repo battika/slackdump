@@ -17,12 +17,15 @@ package viewer
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/rusq/slack"
+
+	"github.com/rusq/slackdump/v4/internal/chunk/backend/dbase"
 )
 
 // minQueryLen is the shortest query that reaches the source.  Anything shorter
@@ -33,12 +36,27 @@ const minQueryLen = 2
 // recency; the panel says so, and says when it truncated.
 const searchLimit = 500
 
+// The viewer's mode strings are the dbase constants, aliased rather than
+// re-declared: they are the wire values of ?m= and of the search interface's
+// mode parameter at once, so a second copy could drift from the layer that
+// interprets them.
+const (
+	searchModeWords    = dbase.SearchModeWords
+	searchModeContains = dbase.SearchModeContains
+)
+
 // messageSearcher is the feature gate for search.  Sources implementing it get
 // a search UI; sources that do not get none, and /search returns 404 — the
 // same shape as the aliaser gate.  It is unexported and satisfied by runtime
 // type assertion so that source.Sourcer is not widened.
+//
+// mode and byRelevance mirror dbase.Source.SearchMessages's mode/ordering
+// parameters (dbase.SearchModeWords / dbase.SearchModeContains), passed
+// through as plain strings/bools rather than a shared type because dbase
+// cannot import this package.  Both come straight from the request; see
+// requestedMode and requestedRelevance.
 type messageSearcher interface {
-	SearchMessages(ctx context.Context, query, channelID string, limit int) ([]slack.Message, bool, error)
+	SearchMessages(ctx context.Context, query, channelID, mode string, byRelevance bool, limit int) ([]slack.Message, bool, error)
 }
 
 func (v *Viewer) searcher() (messageSearcher, bool) {
@@ -71,12 +89,32 @@ type searchHit struct {
 type searchView struct {
 	Query     string
 	ChannelID string // "" means all conversations
-	Hits      []searchHit
-	Truncated bool
-	Active    int // 1-based index of the active hit, 0 when none
-	TooShort  bool
-	PrevURL   string // activation URL for the previous hit; empty on the first
-	NextURL   string // activation URL for the next hit; empty on the last
+	// Mode and ByRelevance are the choices this search was run with, echoed
+	// back so the controls render in the state that produced the results.
+	// They are set on every render path, including the ones that never reach
+	// the source: a selector that resets itself as you type is a bug.
+	//
+	// There is deliberately no SearchIndexReady counterpart.  The full-text
+	// index is built lazily on the first word search, so at render time
+	// "is there an index" has no answer — only IndexUnavailable, which is the
+	// answer a search actually produced.
+	Mode        string // searchModeWords or searchModeContains
+	ByRelevance bool
+	// IndexUnavailable reports that word mode was asked for on an archive
+	// whose full-text index cannot be built.  It is a view state, not an
+	// error: the panel explains it and the mode stays as chosen.
+	IndexUnavailable bool
+	Hits             []searchHit
+	Truncated        bool
+	Active           int // 1-based index of the active hit, 0 when none
+	TooShort         bool
+	PrevURL          string // activation URL for the previous hit; empty on the first
+	NextURL          string // activation URL for the next hit; empty on the last
+	// PrefixURL re-runs the query as a prefix search; ContainsURL re-runs it as a
+	// substring scan.  Both are set only for an empty word-mode result, the one
+	// state where the user needs an escape offered rather than explained.
+	PrefixURL   string
+	ContainsURL string
 	// OOB is the conversation view accompanying an activated hit, rendered as
 	// an hx-swap-oob fragment that replaces #conversation.  Nil when no hit is
 	// active.
@@ -97,8 +135,10 @@ func excerpt(s string) string {
 	return string([]rune(s)[:excerptLen]) + "…"
 }
 
-// buildHits converts raw matches into panel rows.
-func (v *Viewer) buildHits(msgs []slack.Message, query, channelID string) []searchHit {
+// buildHits converts raw matches into panel rows.  mode and byRelevance are
+// carried into every row URL so that clicking a result re-runs the search the
+// user actually asked for.
+func (v *Viewer) buildHits(msgs []slack.Message, query, channelID, mode string, byRelevance bool) []searchHit {
 	hits := make([]searchHit, 0, len(msgs))
 	for i, m := range msgs {
 		ch, _ := v.ch.find(m.Channel)
@@ -107,7 +147,7 @@ func (v *Viewer) buildHits(msgs []slack.Message, query, channelID string) []sear
 			ChannelName: v.channelDisplayName(ch),
 			Excerpt:     excerpt(m.Text),
 			IsThread:    m.ThreadTimestamp != "" && m.ThreadTimestamp != m.Timestamp,
-			URL:         v.rts.SearchHit(query, channelID, i+1),
+			URL:         v.rts.SearchHit(query, channelID, i+1, mode, byRelevance),
 		})
 	}
 	return hits
@@ -117,8 +157,13 @@ func (v *Viewer) buildHits(msgs []slack.Message, query, channelID string) []sear
 // link so the results are bookmarkable.
 func (v *Viewer) renderSearch(w http.ResponseWriter, r *http.Request, sv searchView) {
 	if isHXRequest(r) {
-		if err := v.tmpl.ExecuteTemplate(w, "hx_search", sv); err != nil {
-			v.lg.ErrorContext(r.Context(), "ExecuteTemplate", "error", err, "template", "hx_search")
+		// hx_search_response is the panel plus an out-of-band refresh of the
+		// mode controls, which live in the sidebar and would otherwise keep
+		// showing whatever mode the page was loaded with.  The wrapper exists
+		// so the OOB fragment cannot reach the full-page branch below, where
+		// hx-swap-oob is inert markup rather than an instruction.
+		if err := v.tmpl.ExecuteTemplate(w, "hx_search_response", sv); err != nil {
+			v.lg.ErrorContext(r.Context(), "ExecuteTemplate", "error", err, "template", "hx_search_response")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
@@ -150,10 +195,14 @@ func (v *Viewer) searchHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query().Get("q")
 	channelID := r.URL.Query().Get("ch")
+	mode := requestedMode(r)
+	byRelevance := requestedRelevance(r)
 
 	view := searchView{
-		Query:     query,
-		ChannelID: channelID,
+		Query:       query,
+		ChannelID:   channelID,
+		Mode:        mode,
+		ByRelevance: byRelevance,
 	}
 	if len([]rune(query)) < minQueryLen {
 		view.TooShort = true
@@ -161,23 +210,46 @@ func (v *Viewer) searchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s, _ := v.searcher()
-	hits, truncated, err := s.SearchMessages(ctx, query, channelID, searchLimit)
+	hits, truncated, err := s.SearchMessages(ctx, query, channelID, mode, byRelevance, searchLimit)
 	if err != nil {
+		if errors.Is(err, dbase.ErrIndexUnavailable) {
+			// Word search needs an index this archive cannot build — a
+			// read-only file, typically.  That is a state the panel can
+			// explain, not a server fault, so it renders with no hits and a
+			// 200.  Quietly retrying in contains mode would answer a question
+			// the user did not ask, which is exactly what a per-query mode
+			// switch exists to avoid.
+			v.lg.WarnContext(ctx, "full-text index unavailable", "error", err)
+			view.IndexUnavailable = true
+			view.ContainsURL = v.rts.SearchHit(query, channelID, 0, searchModeContains, false)
+			v.renderSearch(w, r, view)
+			return
+		}
 		v.lg.ErrorContext(ctx, "SearchMessages", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	view.Truncated = truncated
-	view.Hits = v.buildHits(hits, query, channelID)
+	view.Hits = v.buildHits(hits, query, channelID, mode, byRelevance)
+	if mode == searchModeWords && len(view.Hits) == 0 {
+		// Word matching is whole-token, so on an inflected language a stem
+		// finds nothing that a substring scan would find.  Offer both ways out
+		// rather than explaining the difference in prose.  A query that already
+		// ends in a star has no prefix retry left to suggest.
+		if !strings.HasSuffix(query, "*") {
+			view.PrefixURL = v.rts.SearchHit(query+"*", channelID, 0, searchModeWords, byRelevance)
+		}
+		view.ContainsURL = v.rts.SearchHit(query, channelID, 0, searchModeContains, false)
+	}
 
 	if i := requestedHit(r); i >= 1 && i <= len(view.Hits) {
 		view.Hits[i-1].Active = true
 		view.Active = i
 		if i > 1 {
-			view.PrevURL = v.rts.SearchHit(query, channelID, i-1)
+			view.PrevURL = v.rts.SearchHit(query, channelID, i-1, mode, byRelevance)
 		}
 		if i < len(view.Hits) {
-			view.NextURL = v.rts.SearchHit(query, channelID, i+1)
+			view.NextURL = v.rts.SearchHit(query, channelID, i+1, mode, byRelevance)
 		}
 		oob, err := v.activate(ctx, hits[i-1])
 		if err != nil {
@@ -198,6 +270,26 @@ func requestedHit(r *http.Request) int {
 		return 0
 	}
 	return n
+}
+
+// requestedMode reads the ?m= matching mode.  Words is the default, so absent,
+// empty and unrecognised values all yield it and only an exact "contains"
+// selects the substring scan.  Like requestedPage and requestedHit it never
+// errors: a hand-edited URL degrades to the mode most searches want rather
+// than producing a 500.
+func requestedMode(r *http.Request) string {
+	if r.URL.Query().Get("m") == searchModeContains {
+		return searchModeContains
+	}
+	return searchModeWords
+}
+
+// requestedRelevance reads the ?sort= ordering.  Only an exact "relevance"
+// asks for bm25 ranking; everything else, absent and malformed included, means
+// newest first.  The source ignores it outside word mode, a LIKE scan having
+// no score to rank by.
+func requestedRelevance(r *http.Request) bool {
+	return r.URL.Query().Get("sort") == "relevance"
 }
 
 // activate builds the conversation view that accompanies an activated hit.

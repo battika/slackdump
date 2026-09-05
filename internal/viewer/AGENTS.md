@@ -229,6 +229,37 @@ on an HTMX channel swap, so `channelPartial` returns `hx_conversation_swap` — 
 plus an out-of-band refresh of `search_scope`. Without it "this conversation" names whichever
 channel the page was first loaded on.
 
+The mode and sort radios are the second instance of that pattern, and the one to copy. They too
+live in the sidebar, and the empty-word panel links change the mode, so the HTMX branch of
+`renderSearch` renders **`hx_search_response`** — `hx_search` plus `search_controls_oob`. The
+wrapper template, not a flag on `searchView`, is the mechanism: `renderSearch` already branches on
+`isHXRequest`, so splitting the template costs nothing and makes the OOB block unreachable from the
+full-page branch, where `index.html` renders `hx_search` alone. A boolean would have to be set
+correctly at every call site and would eventually be forgotten at one. Do not move
+`search_controls_oob` inside `hx_search`: `index.html` renders that same define for a bookmarked
+`/search?…` URL, and an earlier cut of this shipped exactly that, emitting the controls twice.
+
+### 20a. Every search URL carries the mode and ordering
+
+`Routes.SearchHit` is the only search URL the viewer emits, so it takes `mode` and `byRelevance`
+and every caller — result rows, `PrevURL`, `NextURL` — must pass through what the request asked
+for. A step link that dropped them would re-run the query in a different mode and land on a
+different message. It emits `m=` and `sort=` only when they are *not* the defaults, so a word-mode
+newest-first link is byte-identical to the pre-mode form and old bookmarks still round-trip
+through `requestedMode`/`requestedRelevance` to the same search.
+
+Word mode is the default: `requestedMode` returns `searchModeContains` only for an exact
+`"contains"` and words for everything else, absent and junk included, the same tolerance
+`requestedPage` and `requestedHit` apply.
+
+`dbase.ErrIndexUnavailable` is a **view state, not a 500**. Word search on an archive whose
+full-text index cannot be built (a read-only file) sets `searchView.IndexUnavailable`, renders the
+panel with no hits and returns 200. Do not fall back to contains mode: the user chose a mode, and
+silently answering a different question is the thing per-query mode selection exists to prevent.
+
+There is deliberately **no** `SearchIndexReady` field. The index is built lazily on the first word
+search, so at render time the question has no answer.
+
 ### 21. `hx_thread` serves two homes
 
 `ThreadInMain` switches its header between the panel close button and a "← Back to" link. In the

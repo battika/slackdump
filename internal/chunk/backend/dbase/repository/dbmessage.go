@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log/slog"
 	"runtime/trace"
 	"strings"
 
@@ -146,6 +147,22 @@ type MessageRepository interface {
 	// accented characters, and query is matched literally — LIKE
 	// metacharacters in it carry no special meaning.
 	SearchMessages(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, limit int) (iter.Seq2[DBMessage, error], error)
+	// SearchMessagesFTS returns messages whose text matches query via the
+	// FTS5 full-text index, across the channel timeline AND thread replies,
+	// deduplicated the way every other query in this file dedupes, with one
+	// wrinkle worth stating precisely: of the rows that *match*, only the one
+	// with the highest CHUNK_ID for a given message ID is returned. Matching
+	// happens before the grouping, so a message later edited into text that no
+	// longer matches is still found, under its older text. LIKE-mode
+	// SearchMessages behaves identically, so the two modes agree. Unlike
+	// SearchMessages, it matches whole tokens rather than substrings — a term
+	// that is only part of a fixture word will not match. An empty channelID
+	// searches every conversation. When byRelevance is false, results are
+	// ordered newest first; when true, they are ordered by bm25 relevance
+	// (best match first) instead of recency. The caller must have already
+	// called EnsureFTS — SearchMessagesFTS assumes the index exists and does
+	// not build or refresh it.
+	SearchMessagesFTS(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, byRelevance bool, limit int) (iter.Seq2[DBMessage, error], error)
 	// AllForID returns all messages in a channel.
 	AllForID(ctx context.Context, conn sqlx.QueryerContext, channelID string) (iter.Seq2[DBMessage, error], error)
 	// PageForID returns a window of the channel timeline, ordered oldest
@@ -232,6 +249,133 @@ func (r messageRepository) SearchMessages(ctx context.Context, conn sqlx.Queryer
 		},
 		chunk.CMessages, chunk.CThreadMessages,
 	)
+}
+
+func (r messageRepository) SearchMessagesFTS(ctx context.Context, conn sqlx.QueryerContext, query, channelID string, byRelevance bool, limit int) (iter.Seq2[DBMessage, error], error) {
+	// MATCH '' is a syntax error, so an empty ftsQuery result must never reach
+	// the database: return an empty iterator instead of running anything.
+	match := ftsQuery(query)
+	if match == "" {
+		return func(yield func(DBMessage, error) bool) {}, nil
+	}
+
+	if byRelevance {
+		return r.searchMessagesFTSByRelevance(ctx, conn, match, channelID, limit)
+	}
+
+	// Deliberately no channelTimelineCondition, for the same reason as
+	// SearchMessages: it would drop thread replies from the results.
+	where := "T.ROWID IN (SELECT rowid FROM " + ftsTable + " WHERE " + ftsTable + " MATCH ?)"
+	binds := []any{match}
+	if channelID != "" {
+		where += " AND T.CHANNEL_ID = ?"
+		binds = append(binds, channelID)
+	}
+	return r.allOfTypeWhere(
+		ctx,
+		conn,
+		queryParams{
+			Where:   where,
+			Binds:   binds,
+			OrderBy: []string{"T.ID DESC"},
+			Limit:   limit,
+		},
+		chunk.CMessages, chunk.CThreadMessages,
+	)
+}
+
+// searchMessagesFTSByRelevance is the bm25-ordered sibling of the plain "T.ROWID
+// IN (...)" search above. That IN-form discards the rank FTS5 computes, so
+// relevance order needs a statement that keeps it: a HITS CTE carries
+// (rowid, bm25 rank) for every matching row.
+//
+// The dedup must run over the *matching* rows, not over every row: the LATEST
+// select's WHERE carries the same "T.ROWID IN (...)" condition as the newest-
+// first path above, so MAX(CHUNK_ID) is computed only among a message's
+// versions that satisfy the query — exactly mirroring the newest-first path
+// and SearchMessages. Deduping first and filtering by HITS afterwards would be
+// worse: MESSAGE.ID is derived from the message timestamp alone, not scoped by
+// channel, so an unrelated message in another channel that happens to share a
+// timestamp — and therefore an ID — could win the MAX(CHUNK_ID) race and mask
+// a real match while matching nothing itself. Filtering first keeps such a row
+// out of the grouping entirely.
+//
+// It does not make the masking impossible, only rarer. When two rows sharing
+// an ID *both* match, GROUP BY T.ID still collapses them to the higher
+// CHUNK_ID and the other channel's hit is lost — an unscoped search over
+// "needle in channel one" (C1, chunk 1) and "needle in channel two" (C2, chunk
+// 2) returns one hit, not two. That is pre-existing behaviour of
+// stmtLatestWhere, shared with the newest-first path and with LIKE-mode
+// SearchMessages, and cross-channel ID collisions have not been observed in a
+// real archive, so it is documented here rather than worked around.
+//
+// HITS is joined only to attach the rank of the row the dedup already chose,
+// and T.ROWID is unique, so every output row is guaranteed exactly one HITS
+// match.
+//
+// bm25() returns a more-negative score for a better match, so ORDER BY rank
+// ascending is "best first".
+func (r messageRepository) searchMessagesFTSByRelevance(ctx context.Context, conn sqlx.QueryerContext, match, channelID string, limit int) (iter.Seq2[DBMessage, error], error) {
+	ctx, task := trace.NewTask(ctx, "searchMessagesFTSByRelevance")
+
+	where := "T.ROWID IN (SELECT rowid FROM " + ftsTable + " WHERE " + ftsTable + " MATCH ?)"
+	dedupBinds := []any{match}
+	if channelID != "" {
+		where += " AND T.CHANNEL_ID = ?"
+		dedupBinds = append(dedupBinds, channelID)
+	}
+	latest, latestBinds := r.stmtLatestWhere(queryParams{Where: where, Binds: dedupBinds}, chunk.CMessages, chunk.CThreadMessages)
+
+	var buf strings.Builder
+	buf.WriteString("WITH HITS AS (\n")
+	buf.WriteString("SELECT rowid AS rid, bm25(" + ftsTable + ") AS rank FROM " + ftsTable + " WHERE " + ftsTable + " MATCH ?\n")
+	buf.WriteString(")\n")
+	buf.WriteString("SELECT T.")
+	buf.WriteString(strings.Join(r.t.columns(), ",T."))
+	buf.WriteString(" FROM ")
+	buf.WriteString(r.t.tablename())
+	buf.WriteString(" AS T\n")
+	buf.WriteString("JOIN (\n")
+	buf.WriteString(latest)
+	buf.WriteString("\n) AS L ON T.ID = L.ID AND T.CHUNK_ID = L.CHUNK_ID\n")
+	buf.WriteString("JOIN HITS H ON H.rid = T.ROWID\n")
+	buf.WriteString("ORDER BY H.rank")
+	if limit > 0 {
+		fmt.Fprintf(&buf, " LIMIT %d", limit)
+	}
+
+	stmt := buf.String()
+	// match binds the top-level HITS CTE; latestBinds binds the identical
+	// condition embedded in the LATEST select (see stmtLatestWhere).
+	binds := append([]any{match}, latestBinds...)
+
+	slog.DebugContext(ctx, "searchMessagesFTSByRelevance", "stmt", stmt, "binds", binds)
+
+	rgn := trace.StartRegion(ctx, "searchMessagesFTSByRelevance.query")
+	rows, err := conn.QueryxContext(ctx, rebind(conn, stmt), binds...)
+	rgn.End()
+	if err != nil {
+		return nil, fmt.Errorf("searchMessagesFTSByRelevance: %w", err)
+	}
+	it := func(yield func(DBMessage, error) bool) {
+		defer task.End()
+		defer rows.Close()
+		var t DBMessage
+		for rows.Next() {
+			if err := rows.StructScan(&t); err != nil {
+				yield(t, fmt.Errorf("searchMessagesFTSByRelevance: %w", err))
+				return
+			}
+			if !yield(t, nil) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(t, fmt.Errorf("searchMessagesFTSByRelevance: %w", err))
+			return
+		}
+	}
+	return it, nil
 }
 
 func (r messageRepository) AllForID(ctx context.Context, conn sqlx.QueryerContext, channelID string) (iter.Seq2[DBMessage, error], error) {

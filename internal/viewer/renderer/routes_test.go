@@ -157,23 +157,32 @@ func TestRoutes_ChannelMessage(t *testing.T) {
 }
 
 func TestRoutes_SearchHit(t *testing.T) {
+	// The defaults — word mode, newest first — are omitted from the URL, so a
+	// link emitted today has exactly the shape it had before mode selection
+	// existed, and round-trips back through requestedMode to the same search.
 	tests := []struct {
-		name      string
-		rts       *Routes
-		query     string
-		channelID string
-		i         int
-		want      string
+		name        string
+		rts         *Routes
+		query       string
+		channelID   string
+		i           int
+		mode        string
+		byRelevance bool
+		want        string
 	}{
-		{"global hit", NewRoutes(ModeLive), "login", "", 3, "/search?i=3&q=login"},
-		{"scoped hit", NewRoutes(ModeLive), "login", "C1", 3, "/search?ch=C1&i=3&q=login"},
-		{"no active hit", NewRoutes(ModeLive), "login", "", 0, "/search?q=login"},
-		{"query is escaped", NewRoutes(ModeLive), "a b&c", "", 0, "/search?q=a+b%26c"},
-		{"static mode has no search", NewRoutes(ModeStatic), "login", "", 3, ""},
+		{"global hit", NewRoutes(ModeLive), "login", "", 3, "words", false, "/search?i=3&q=login"},
+		{"scoped hit", NewRoutes(ModeLive), "login", "C1", 3, "words", false, "/search?ch=C1&i=3&q=login"},
+		{"no active hit", NewRoutes(ModeLive), "login", "", 0, "words", false, "/search?q=login"},
+		{"query is escaped", NewRoutes(ModeLive), "a b&c", "", 0, "words", false, "/search?q=a+b%26c"},
+		{"an empty mode is the default too", NewRoutes(ModeLive), "login", "", 3, "", false, "/search?i=3&q=login"},
+		{"contains mode is carried", NewRoutes(ModeLive), "login", "", 3, "contains", false, "/search?i=3&m=contains&q=login"},
+		{"relevance ordering is carried", NewRoutes(ModeLive), "login", "", 3, "words", true, "/search?i=3&q=login&sort=relevance"},
+		{"both non-defaults", NewRoutes(ModeLive), "login", "C1", 3, "contains", true, "/search?ch=C1&i=3&m=contains&q=login&sort=relevance"},
+		{"static mode has no search", NewRoutes(ModeStatic), "login", "", 3, "contains", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.rts.SearchHit(tt.query, tt.channelID, tt.i); got != tt.want {
+			if got := tt.rts.SearchHit(tt.query, tt.channelID, tt.i, tt.mode, tt.byRelevance); got != tt.want {
 				t.Errorf("SearchHit() = %q, want %q", got, tt.want)
 			}
 		})

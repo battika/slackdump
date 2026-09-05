@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -1220,7 +1221,7 @@ func TestSource_SearchMessages(t *testing.T) {
 	}
 
 	t.Run("returns newest first and stamps the channel", func(t *testing.T) {
-		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 10)
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", SearchModeContains, false, 10)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
@@ -1241,7 +1242,7 @@ func TestSource_SearchMessages(t *testing.T) {
 	})
 
 	t.Run("reports truncation and trims to the cap", func(t *testing.T) {
-		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 1)
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", SearchModeContains, false, 1)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
@@ -1254,7 +1255,7 @@ func TestSource_SearchMessages(t *testing.T) {
 	})
 
 	t.Run("exactly at the cap is not truncated", func(t *testing.T) {
-		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", 2)
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", SearchModeContains, false, 2)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
@@ -1267,14 +1268,14 @@ func TestSource_SearchMessages(t *testing.T) {
 	})
 
 	t.Run("scoped to a channel", func(t *testing.T) {
-		got, _, err := newSrc(t).SearchMessages(t.Context(), "login", "C01", 10)
+		got, _, err := newSrc(t).SearchMessages(t.Context(), "login", "C01", SearchModeContains, false, 10)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
 		if len(got) != 2 {
 			t.Errorf("got %d hits, want 2", len(got))
 		}
-		got, _, err = newSrc(t).SearchMessages(t.Context(), "login", "CNOPE", 10)
+		got, _, err = newSrc(t).SearchMessages(t.Context(), "login", "CNOPE", SearchModeContains, false, 10)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
@@ -1288,7 +1289,7 @@ func TestSource_SearchMessages(t *testing.T) {
 		// repository reads Limit <= 0 as "no LIMIT clause", so the query ran
 		// unbounded and the trim then sliced with a negative bound.
 		for _, limit := range []int{0, -1} {
-			got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", limit)
+			got, truncated, err := newSrc(t).SearchMessages(t.Context(), "login", "", SearchModeContains, false, limit)
 			if err != nil {
 				t.Fatalf("limit=%d: SearchMessages() error = %v", limit, err)
 			}
@@ -1299,12 +1300,290 @@ func TestSource_SearchMessages(t *testing.T) {
 	})
 
 	t.Run("no matches", func(t *testing.T) {
-		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "zzz", "", 10)
+		got, truncated, err := newSrc(t).SearchMessages(t.Context(), "zzz", "", SearchModeContains, false, 10)
 		if err != nil {
 			t.Fatalf("SearchMessages() error = %v", err)
 		}
 		if len(got) != 0 || truncated {
 			t.Errorf("got %d hits truncated=%v, want 0/false", len(got), truncated)
+		}
+	})
+
+	// loginMsgs gives word mode a real whole-token/substring contrast: "log"
+	// is a substring of both "login" and "logout" but is nobody's whole
+	// token, so it is the term the whole feature exists to handle differently.
+	loginMsgs := []slack.Message{
+		{Msg: slack.Msg{Timestamp: "1234567890.000001", Text: "alpha login succeeded"}},
+		{Msg: slack.Msg{Timestamp: "1234567890.000002", Text: "beta login failed"}},
+		{Msg: slack.Msg{Timestamp: "1234567890.000003", Text: "gamma logout"}},
+	}
+	newWordSrc := func(t *testing.T) *Source {
+		t.Helper()
+		conn := testDB(t)
+		prepTestChunk(&chunk.Chunk{Type: chunk.CMessages, ChannelID: "C01", Messages: loginMsgs})(t, conn)
+		return &Source{conn: conn, canClose: true}
+	}
+
+	ftsTableExists := func(t *testing.T, conn *sqlx.DB) bool {
+		t.Helper()
+		var n int
+		if err := conn.QueryRowxContext(t.Context(),
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='MESSAGE_FTS'`).Scan(&n); err != nil {
+			t.Fatalf("sqlite_master query: %v", err)
+		}
+		return n > 0
+	}
+
+	t.Run("word mode finds a whole-token match", func(t *testing.T) {
+		got, truncated, err := newWordSrc(t).SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("SearchMessages() error = %v", err)
+		}
+		if truncated {
+			t.Error("truncated = true, want false")
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d hits, want 2", len(got))
+		}
+		if got[0].Text != "beta login failed" || got[1].Text != "alpha login succeeded" {
+			t.Errorf("hits = %q, %q; want newest first", got[0].Text, got[1].Text)
+		}
+	})
+
+	t.Run("word mode and contains mode differ on a substring that is not a token", func(t *testing.T) {
+		src := newWordSrc(t)
+		contains, _, err := src.SearchMessages(t.Context(), "log", "", SearchModeContains, false, 10)
+		if err != nil {
+			t.Fatalf("contains: SearchMessages() error = %v", err)
+		}
+		if len(contains) != 3 {
+			t.Fatalf("contains: got %d hits, want 3 (login x2 + logout)", len(contains))
+		}
+		words, _, err := src.SearchMessages(t.Context(), "log", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("words: SearchMessages() error = %v", err)
+		}
+		if len(words) != 0 {
+			t.Errorf("words: got %d hits, want 0 - \"log\" is nobody's whole token", len(words))
+		}
+	})
+
+	t.Run("an unrecognised mode degrades to contains", func(t *testing.T) {
+		src := newWordSrc(t)
+		want, _, err := src.SearchMessages(t.Context(), "log", "", SearchModeContains, false, 10)
+		if err != nil {
+			t.Fatalf("contains: SearchMessages() error = %v", err)
+		}
+		got, _, err := src.SearchMessages(t.Context(), "log", "", "bogus-mode", false, 10)
+		if err != nil {
+			t.Fatalf("bogus mode: SearchMessages() error = %v", err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %d hits, want %d (same as contains)", len(got), len(want))
+		}
+		for i := range want {
+			if got[i].Text != want[i].Text {
+				t.Errorf("hit %d = %q, want %q", i, got[i].Text, want[i].Text)
+			}
+		}
+		if ftsTableExists(t, src.conn) {
+			t.Error("MESSAGE_FTS exists after an unrecognised-mode search; it degrades to contains and must not index")
+		}
+	})
+
+	t.Run("the index is not built until word mode is used", func(t *testing.T) {
+		src := newWordSrc(t)
+		if _, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeContains, false, 10); err != nil {
+			t.Fatalf("contains: SearchMessages() error = %v", err)
+		}
+		if ftsTableExists(t, src.conn) {
+			t.Error("MESSAGE_FTS exists after a contains-mode-only search")
+		}
+		if _, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10); err != nil {
+			t.Fatalf("words: SearchMessages() error = %v", err)
+		}
+		if !ftsTableExists(t, src.conn) {
+			t.Error("MESSAGE_FTS does not exist after a word-mode search")
+		}
+	})
+
+	t.Run("EnsureFTS runs once per Source, not per query", func(t *testing.T) {
+		src := newWordSrc(t)
+		if _, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10); err != nil {
+			t.Fatalf("first search: %v", err)
+		}
+		// A foreign write that goes through prepTestChunk, not through
+		// SearchMessages, mimics a later dump appending to the same archive.
+		// If EnsureFTS ran again on the second search it would notice MESSAGE
+		// changed and rebuild, picking up this new message. It must not: the
+		// build runs once per Source.
+		prepTestChunk(&chunk.Chunk{
+			Type:      chunk.CMessages,
+			ChannelID: "C01",
+			Messages: []slack.Message{
+				{Msg: slack.Msg{Timestamp: "1234567890.000004", Text: "delta login again"}},
+			},
+		})(t, src.conn)
+
+		got, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("second search: %v", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d hits, want 2 (the index must still reflect only the first build)", len(got))
+		}
+		for _, m := range got {
+			if m.Text == "delta login again" {
+				t.Error("second search saw the foreign write; EnsureFTS ran again instead of once per Source")
+			}
+		}
+	})
+
+	t.Run("byRelevance is accepted in word mode and returns the same set as newest ordering", func(t *testing.T) {
+		src := newWordSrc(t)
+		newest, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("newest: SearchMessages() error = %v", err)
+		}
+		byRel, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, true, 10)
+		if err != nil {
+			t.Fatalf("byRelevance: SearchMessages() error = %v", err)
+		}
+		if len(byRel) != len(newest) {
+			t.Fatalf("got %d hits, want %d", len(byRel), len(newest))
+		}
+		newestSet := make(map[string]bool, len(newest))
+		for _, m := range newest {
+			newestSet[m.Text] = true
+		}
+		for _, m := range byRel {
+			if !newestSet[m.Text] {
+				t.Errorf("byRelevance hit %q not present in the newest-ordering result set", m.Text)
+			}
+		}
+	})
+
+	// newReadOnlySrc returns a Source over an archive that genuinely cannot be
+	// written to, which is the one way the index build legitimately fails:
+	// creating the index is a write, and a read-only file refuses it.
+	newReadOnlySrc := func(t *testing.T) *Source {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "archive.sqlite")
+		conn := testDBDSN(t, path)
+		prepTestChunk(&chunk.Chunk{Type: chunk.CMessages, ChannelID: "C01", Messages: loginMsgs})(t, conn)
+		// Close before reopening read-only so the WAL is checkpointed away:
+		// a leftover WAL would need a write to replay and the failure under
+		// test would be the wrong one.
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		ro, err := sqlx.Open(repository.Driver, "file:"+path+"?mode=ro")
+		if err != nil {
+			t.Fatalf("open read-only: %v", err)
+		}
+		t.Cleanup(func() { ro.Close() })
+		if err := ro.PingContext(t.Context()); err != nil {
+			t.Fatalf("ping read-only: %v", err)
+		}
+		return &Source{conn: ro, canClose: true}
+	}
+
+	t.Run("a cancelled first word-mode search does not disable word search", func(t *testing.T) {
+		// The viewer searches on keyup and htmx aborts the in-flight request
+		// when the next keystroke fires, so a cancelled first word-mode
+		// search is the common case, not an exotic one.  Caching that failure
+		// used to kill word mode for the life of the Source.
+		src := newWordSrc(t)
+
+		cancelled, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, _, err := src.SearchMessages(cancelled, "login", "", SearchModeWords, false, 10); err == nil {
+			t.Fatal("a search on a cancelled context should fail")
+		}
+
+		got, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("the next search on the same Source must succeed, got error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d hits, want 2", len(got))
+		}
+	})
+
+	t.Run("a cancelled search reports cancellation, not an unavailable index", func(t *testing.T) {
+		src := newWordSrc(t)
+		cancelled, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, _, err := src.SearchMessages(cancelled, "login", "", SearchModeWords, false, 10)
+		if err == nil {
+			t.Fatal("a search on a cancelled context should fail")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want it to wrap context.Canceled", err)
+		}
+		if errors.Is(err, ErrIndexUnavailable) {
+			t.Errorf("err = %v, want it not to claim an unavailable index: "+
+				"the archive is writable, the caller just went away", err)
+		}
+	})
+
+	t.Run("a read-only archive keeps reporting an unavailable index", func(t *testing.T) {
+		// Retrying the build is fine — it fails immediately on the first
+		// write — but the error the caller sees must stay right on every call,
+		// because that is what the viewer turns into its explanation.
+		src := newReadOnlySrc(t)
+		for i := range 2 {
+			_, _, err := src.SearchMessages(t.Context(), "login", "", SearchModeWords, false, 10)
+			if err == nil {
+				t.Fatalf("call %d: word search on a read-only archive should fail", i)
+			}
+			if !errors.Is(err, ErrIndexUnavailable) {
+				t.Errorf("call %d: err = %v, want it to wrap ErrIndexUnavailable", i, err)
+			}
+		}
+	})
+
+	// relevanceMsgs' bm25 order and recency order genuinely disagree: the
+	// older message is two tokens long and both are the search term, the
+	// newer mentions it once in some two hundred words of filler.  bm25
+	// prefers the short dense document, recency the long sparse one.  The
+	// loginMsgs fixture cannot tell the two orderings apart, so without this
+	// pair a Source that dropped byRelevance on the floor would look fine.
+	relevanceMsgs := []slack.Message{
+		{Msg: slack.Msg{Timestamp: "1234567890.000001", Text: "needle needle"}},
+		{Msg: slack.Msg{Timestamp: "1234567890.000002", Text: "needle " + strings.Repeat("filler ", 200)}},
+	}
+	newRelevanceSrc := func(t *testing.T) *Source {
+		t.Helper()
+		conn := testDB(t)
+		prepTestChunk(&chunk.Chunk{Type: chunk.CMessages, ChannelID: "C01", Messages: relevanceMsgs})(t, conn)
+		return &Source{conn: conn, canClose: true}
+	}
+
+	t.Run("byRelevance changes which hit comes first", func(t *testing.T) {
+		src := newRelevanceSrc(t)
+		short, long := relevanceMsgs[0].Text, relevanceMsgs[1].Text
+
+		newest, _, err := src.SearchMessages(t.Context(), "needle", "", SearchModeWords, false, 10)
+		if err != nil {
+			t.Fatalf("newest: SearchMessages() error = %v", err)
+		}
+		byRel, _, err := src.SearchMessages(t.Context(), "needle", "", SearchModeWords, true, 10)
+		if err != nil {
+			t.Fatalf("byRelevance: SearchMessages() error = %v", err)
+		}
+		if len(newest) != 2 || len(byRel) != 2 {
+			t.Fatalf("both orderings should return both messages, got %d and %d", len(newest), len(byRel))
+		}
+		if newest[0].Text != long {
+			t.Errorf("newest-first hit = %.30q..., want the newer, longer message", newest[0].Text)
+		}
+		if byRel[0].Text != short {
+			t.Errorf("byRelevance hit = %.30q..., want the older, denser message", byRel[0].Text)
+		}
+		if newest[0].Text == byRel[0].Text {
+			t.Error("the two orderings agreed on the first hit; the fixture cannot tell a live byRelevance from an ignored one")
 		}
 	})
 }
