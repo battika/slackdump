@@ -137,7 +137,18 @@
     // the URLs and all state live on the server, so the keyboard shortcut and
     // a mouse click take exactly the same path.
     function onSearchKeydown(event) {
-        if (event.target.matches("input, textarea, select")) {
+        // Modifier chords (Ctrl/Cmd+N "new window", Alt+N menu mnemonics) belong
+        // to the browser.  Shift is deliberately not in the list: it is what
+        // produces "N".
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return;
+        }
+        // Keys typed into any editable surface are text, not commands.  The
+        // target can be the document itself (no matches()), hence the guard.
+        var target = event.target;
+        if (event.isComposing || !target || !target.matches ||
+            target.isContentEditable ||
+            target.matches("input, textarea, select")) {
             return;
         }
         var sel = null;
