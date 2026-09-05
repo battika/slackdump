@@ -137,7 +137,18 @@
     // the URLs and all state live on the server, so the keyboard shortcut and
     // a mouse click take exactly the same path.
     function onSearchKeydown(event) {
-        if (event.target.matches("input, textarea, select")) {
+        // Modifier chords (Ctrl/Cmd+N "new window", Alt+N menu mnemonics) belong
+        // to the browser.  Shift is deliberately not in the list: it is what
+        // produces "N".
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return;
+        }
+        // Keys typed into any editable surface are text, not commands.  The
+        // target can be the document itself (no matches()), hence the guard.
+        var target = event.target;
+        if (event.isComposing || !target || !target.matches ||
+            target.isContentEditable ||
+            target.matches("input, textarea, select")) {
             return;
         }
         var sel = null;
@@ -155,14 +166,41 @@
         }
     }
 
+    // True when the swap that just settled is the one that rendered hit.
+    // htmx fires htmx:afterSettle once per swapped-in element (the main target's
+    // new children, and each OOB-swapped element such as the #conversation
+    // section emitted by the search results), with detail.target always naming
+    // the *requesting* element's target.  So an OOB #conversation swap is only
+    // visible through event.target, and a plain hx-target="#conversation" swap
+    // through either; check both.  Containment, not "inside #conversation":
+    // the alias editor in #channel-heading swaps within #conversation without
+    // re-rendering the message list, and must not count.
+    function swapDelivered(event, hit) {
+        var settled = event.target;
+        var requested = event.detail && event.detail.target;
+        return contains(settled, hit) || contains(requested, hit);
+    }
+
+    function contains(el, node) {
+        return !!(el && el.nodeType === 1 && el.contains(node));
+    }
+
     // An out-of-band swap is not a navigation, so the #anchor never fires and
     // the activated message can land thousands of pixels outside the viewport.
-    // Bring it into view after the swap.
-    function scrollHitIntoView() {
+    // Bring it into view after the swap — but only after the swap that actually
+    // rendered it.  The .search-hit header stays in the DOM for as long as the
+    // hit is active, so scrolling on every settle (opening a thread or profile
+    // in #thread, editing the alias in #channel-heading) would yank the reader
+    // back to the hit and undo their scroll position.
+    function scrollHitIntoView(event) {
         var hit = qs("#conversation .message-header.search-hit");
-        if (hit) {
-            hit.scrollIntoView({block: "center"});
+        if (!hit) {
+            return;
         }
+        if (event && !swapDelivered(event, hit)) {
+            return;
+        }
+        hit.scrollIntoView({block: "center"});
     }
 
     function init() {
@@ -196,9 +234,9 @@
         }
     });
 
-    document.body.addEventListener("htmx:afterSettle", function () {
+    document.body.addEventListener("htmx:afterSettle", function (event) {
         syncActiveChannel();
-        scrollHitIntoView();
+        scrollHitIntoView(event);
     });
 
     // Anything swapped into the side panel should make it visible.  The panel
