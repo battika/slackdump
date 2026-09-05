@@ -166,21 +166,23 @@
         }
     }
 
-    // True when the swap that just settled delivered content into #conversation.
+    // True when the swap that just settled is the one that rendered hit.
     // htmx fires htmx:afterSettle once per swapped-in element (the main target's
     // new children, and each OOB-swapped element such as the #conversation
     // section emitted by the search results), with detail.target always naming
     // the *requesting* element's target.  So an OOB #conversation swap is only
     // visible through event.target, and a plain hx-target="#conversation" swap
-    // through either; check both.
-    function swapTouchesConversation(event) {
+    // through either; check both.  Containment, not "inside #conversation":
+    // the alias editor in #channel-heading swaps within #conversation without
+    // re-rendering the message list, and must not count.
+    function swapDelivered(event, hit) {
         var settled = event.target;
         var requested = event.detail && event.detail.target;
-        return isInConversation(settled) || isInConversation(requested);
+        return contains(settled, hit) || contains(requested, hit);
     }
 
-    function isInConversation(el) {
-        return !!(el && el.nodeType === 1 && el.closest("#conversation"));
+    function contains(el, node) {
+        return !!(el && el.nodeType === 1 && el.contains(node));
     }
 
     // An out-of-band swap is not a navigation, so the #anchor never fires and
@@ -188,16 +190,17 @@
     // Bring it into view after the swap — but only after the swap that actually
     // rendered it.  The .search-hit header stays in the DOM for as long as the
     // hit is active, so scrolling on every settle (opening a thread or profile
-    // in #thread, renaming the channel in #channel-heading) would yank the
-    // reader back to the hit and undo their scroll position.
+    // in #thread, editing the alias in #channel-heading) would yank the reader
+    // back to the hit and undo their scroll position.
     function scrollHitIntoView(event) {
-        if (event && !swapTouchesConversation(event)) {
+        var hit = qs("#conversation .message-header.search-hit");
+        if (!hit) {
             return;
         }
-        var hit = qs("#conversation .message-header.search-hit");
-        if (hit) {
-            hit.scrollIntoView({block: "center"});
+        if (event && !swapDelivered(event, hit)) {
+            return;
         }
+        hit.scrollIntoView({block: "center"});
     }
 
     function init() {
