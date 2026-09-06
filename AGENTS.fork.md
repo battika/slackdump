@@ -123,8 +123,15 @@ Any new workflow needing secrets this fork does not have will fail on every
 push. Disable it server-side rather than deleting the file:
 
 ```bash
-gh workflow disable "<name>" --repo battika/slackdump
+gh workflow disable <file>.yml --repo battika/slackdump
 ```
+
+Address workflows by **filename or numeric ID, never display name**.
+`gh workflow list` shows only active workflows unless given `--all`, and the
+name lookup used by `disable`/`enable` searches that same filtered list — so
+running it against an already-disabled workflow reports `could not find any
+workflows named X` rather than "already disabled". Use `gh workflow list --all`
+to see true state.
 
 Currently disabled this way: **dickerhub** (pushes to upstream's Docker Hub
 namespace with secrets this fork lacks) and **Docker Build**. `Go` and
@@ -165,10 +172,12 @@ for precedence, so `+viewer.1` and `+viewer.2` compare equal, and `+` becomes
 
 ```bash
 # Park the release workflow while seeding the upstream base tag, or pushing it
-# would cut a release of plain upstream.
-gh workflow disable "Release Go Binaries" --repo battika/slackdump
+# would cut a release of plain upstream.  Filename, not display name -- see the
+# gh lookup quirk above.
+gh workflow list --all --repo battika/slackdump      # confirm current state
+gh workflow disable release.yml --repo battika/slackdump
 git push origin vX.Y.Z
-gh workflow enable "Release Go Binaries" --repo battika/slackdump
+gh workflow enable release.yml --repo battika/slackdump
 
 git tag -a vX.Y.Z-viewer.N -m "Viewer enhancements on upstream vX.Y.Z"
 git push origin vX.Y.Z-viewer.N
