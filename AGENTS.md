@@ -3,6 +3,10 @@
 This file captures project-wide conventions for agents working in this
 repository.
 
+> **This checkout is `battika/slackdump`, a fork.** See `AGENTS.fork.md` for
+> what the fork adds, how to merge a new upstream release, and how releases are
+> tagged and built. Read it before syncing with upstream or cutting a release.
+
 ## Project Overview
 
 **Slackdump** is a Go-based tool for archiving Slack workspaces without admin
